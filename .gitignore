@@ -1,0 +1,11 @@
+node_modules/
+.gradle/
+build/
+*.keystore
+*.apk
+*.aab
+.DS_Store
+*.log
+local.properties
+.idea/
+.vscode/
