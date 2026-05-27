@@ -1,20 +1,65 @@
 import React from 'react';
-import { Text, Pressable, StyleSheet, ViewStyle } from 'react-native';
+import { Pressable, Text, StyleSheet, ActivityIndicator, ViewStyle, TextStyle } from 'react-native';
+import { Colors, Font, Radius, Shadow } from '../theme';
 
-type Props = { title: string; onPress: () => void; variant?: 'primary'|'ghost'|'danger'; style?: ViewStyle; disabled?: boolean };
+type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
 
-export default function Button({ title, onPress, variant='primary', style, disabled }: Props) {
-  const bg = disabled ? '#475569' : variant === 'danger' ? '#dc2626' : variant === 'ghost' ? 'transparent' : '#10b981';
-  const border = variant === 'ghost' ? '#10b981' : 'transparent';
+type Props = {
+  title: string;
+  onPress?: () => void;
+  variant?: Variant;
+  disabled?: boolean;
+  loading?: boolean;
+  style?: ViewStyle;
+  textStyle?: TextStyle;
+};
+
+export default function Button({
+  title, onPress, variant = 'primary', disabled, loading, style, textStyle,
+}: Props) {
+  const bg = {
+    primary: Colors.primary,
+    secondary: Colors.card,
+    ghost: 'transparent',
+    danger: Colors.danger,
+    success: Colors.success,
+  }[variant];
+
+  const border = variant === 'ghost' ? Colors.border : 'transparent';
+  const textColor = variant === 'secondary' ? Colors.text : '#fff';
+
   return (
-    <Pressable onPress={disabled?undefined:onPress}
-      style={[styles.btn, { backgroundColor: bg, borderColor: border, borderWidth: variant==='ghost'?2:0 }, style]}>
-      <Text style={styles.text}>{title}</Text>
+    <Pressable
+      onPress={onPress}
+      disabled={disabled || loading}
+      android_ripple={{ color: 'rgba(255,255,255,0.15)' }}
+      style={({ pressed }) => [
+        styles.btn,
+        { backgroundColor: bg, borderColor: border },
+        variant !== 'ghost' && Shadow.soft,
+        (disabled || loading) && styles.disabled,
+        pressed && !disabled && { transform: [{ scale: 0.98 }] },
+        style,
+      ]}
+    >
+      {loading ? (
+        <ActivityIndicator color={textColor} />
+      ) : (
+        <Text style={[styles.label, { color: textColor }, textStyle]}>{title}</Text>
+      )}
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  btn: { paddingVertical: 14, paddingHorizontal: 22, borderRadius: 14, alignItems:'center', marginVertical: 8 },
-  text: { color: '#fff', fontSize: 18, fontFamily: 'Vazir' },
+  btn: {
+    minHeight: 52,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    paddingHorizontal: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  label: { fontFamily: Font.bold, fontSize: 16 },
+  disabled: { opacity: 0.5 },
 });
