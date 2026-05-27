@@ -32,8 +32,7 @@ jobs:
 
       - name: Install JS dependencies
         working-directory: frontend
-        run: |
-          npm install --legacy-peer-deps --no-audit --no-fund
+        run: npm install --legacy-peer-deps --no-audit --no-fund
 
       - name: Download Vazir font
         working-directory: frontend
@@ -44,18 +43,36 @@ jobs:
               https://github.com/rastikerdar/vazir-font/raw/master/dist/Farsi-Digits/Vazir-FD.ttf
           fi
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Generate Gradle wrapper if missing
+      # ⬇️ این بخش جایگزین "Set up Gradle" و "Generate Gradle wrapper" قبلی شد
+      - name: Install Gradle wrapper from RN template (avoids system Gradle 9.x)
         working-directory: frontend/android
         run: |
-          if [ ! -f gradlew ]; then
-            gradle wrapper --gradle-version 8.8
+          TEMPLATE="../node_modules/react-native/template/android"
+          if [ ! -f "$TEMPLATE/gradlew" ]; then
+            echo "ERROR: RN template not found at $TEMPLATE" >&2
+            exit 1
+          fi
+          cp "$TEMPLATE/gradlew" ./gradlew
+          cp "$TEMPLATE/gradlew.bat" ./gradlew.bat 2>/dev/null || true
+          mkdir -p gradle/wrapper
+          cp "$TEMPLATE/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/gradle-wrapper.jar
+          # نگه داشتن gradle-wrapper.properties خودمان (پین شده روی 8.8)
+          if [ ! -f gradle/wrapper/gradle-wrapper.properties ]; then
+            cp "$TEMPLATE/gradle/wrapper/gradle-wrapper.properties" gradle/wrapper/gradle-wrapper.properties
           fi
           chmod +x gradlew
+          ./gradlew --version
 
-      - name: Pre-bundle JS (best effort)
+      - name: Cache Gradle caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('frontend/android/**/*.gradle*', 'frontend/android/**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Bundle JS for Android
         working-directory: frontend
         run: |
           mkdir -p android/app/src/main/assets
@@ -64,10 +81,12 @@ jobs:
             --dev false \
             --entry-file index.js \
             --bundle-output android/app/src/main/assets/index.android.bundle \
-            --assets-dest android/app/src/main/res || true
+            --assets-dest android/app/src/main/res
 
       - name: Build Debug APK
         working-directory: frontend/android
+        env:
+          GRADLE_OPTS: "-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
