@@ -1,103 +1,266 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, TextInput, StyleSheet, ScrollView, BackHandler } from 'react-native';
-import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../../App';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TextInput, BackHandler } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
 import Button from '../components/Button';
+import Modal from '../components/Modal';
 import HostService from '../services/HostService';
 import ClientService from '../services/ClientService';
-import { CATEGORIES, ROUND_DURATION_MS } from '../utils/constants';
+import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
+import { CATEGORIES } from '../utils/constants';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Game'>;
+type Role = 'host' | 'client';
 
-export default function GameScreen({ navigation, route }: Props) {
-  const { role, name } = route.params;
+export default function GameScreen({ navigation, route }: any) {
+  const role: Role = route.params?.role || 'client';
+
   const [letter, setLetter] = useState<string>('');
   const [endsAt, setEndsAt] = useState<number>(0);
-  const [now, setNow] = useState(Date.now());
-  const [answers, setAnswers] = useState<Record<string,string>>({});
-  const [submitted, setSubmitted] = useState(false);
-  const [waiting, setWaiting] = useState(true);
+  const [remaining, setRemaining] = useState<number>(0);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [locked, setLocked] = useState(false);
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [waitingForResults, setWaitingForResults] = useState(false);
 
-  const handler = (ev: any) => {
-    if (ev.type === 'ROUND_START') {
-      setLetter(ev.letter);
-      setEndsAt(ev.endsAt || Date.now() + (ev.durationMs || ROUND_DURATION_MS));
-      setAnswers({});
-      setSubmitted(false);
-      setWaiting(false);
-    } else if (ev.type === 'ROUND_END') {
-      navigation.replace('Score', { results: ev.results, role, name });
-    }
-  };
+  const answersRef = useRef(answers);
+  answersRef.current = answers;
+  const submittedRef = useRef(false);
 
+  // ----- Hydrate round state on mount (CRITICAL FIX) -----
+  // Previously the host could miss its own ROUND_START because the listener
+  // was attached after the broadcast. Now we read the current snapshot directly.
   useEffect(() => {
-    const off = role === 'host' ? HostService.on(handler) : ClientService.on(handler);
-    const i = setInterval(() => setNow(Date.now()), 500);
-    const back = BackHandler.addEventListener('hardwareBackPress', () => true);
-    return () => { off(); clearInterval(i); back.remove(); };
+    const snap = role === 'host'
+      ? HostService.getCurrentRound()
+      : ClientService.getCurrentRound();
+
+    if (snap) {
+      setLetter(snap.letter);
+      setEndsAt(snap.endsAt);
+      setRemaining(Math.max(0, Math.ceil((snap.endsAt - Date.now()) / 1000)));
+    }
+  }, [role]);
+
+  // ----- Subscribe to live events -----
+  useEffect(() => {
+    const handle = (ev: any) => {
+      if (ev.type === 'ROUND_START') {
+        setLetter(ev.letter);
+        setEndsAt(ev.endsAt);
+        setRemaining(Math.max(0, Math.ceil((ev.endsAt - Date.now()) / 1000)));
+        setAnswers({});
+        setLocked(false);
+        setWaitingForResults(false);
+        submittedRef.current = false;
+      } else if (ev.type === 'STOP_TRIGGERED') {
+        // Someone stopped. Lock UI, auto-submit current answers, wait for ROUND_END.
+        setLocked(true);
+        setWaitingForResults(true);
+        submitOnce();
+      } else if (ev.type === 'ROUND_END') {
+        setWaitingForResults(false);
+        navigation.replace('Score', { letter: ev.letter, results: ev.results, role });
+      } else if (ev.type === 'DISCONNECTED' && role === 'client') {
+        navigation.replace('Home');
+      }
+    };
+
+    const off = role === 'host' ? HostService.on(handle) : ClientService.on(handle);
+    return () => { off(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role]);
+
+  // ----- Countdown ticker -----
+  useEffect(() => {
+    if (!endsAt) return;
+    const id = setInterval(() => {
+      const r = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+      setRemaining(r);
+      if (r === 0) clearInterval(id);
+    }, 250);
+    return () => clearInterval(id);
+  }, [endsAt]);
+
+  // ----- Hardware back button: confirm exit -----
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setShowExitConfirm(true);
+      return true;
+    });
+    return () => sub.remove();
   }, []);
 
-  const secondsLeft = useMemo(() => Math.max(0, Math.ceil((endsAt - now) / 1000)), [endsAt, now]);
-
-  useEffect(() => {
-    if (!submitted && endsAt && now >= endsAt) doSubmit();
-  }, [now, endsAt]);
-
-  const setField = (cat: string, v: string) => setAnswers(prev => ({ ...prev, [cat]: v }));
-
-  const doSubmit = () => {
-    if (submitted) return;
-    setSubmitted(true);
+  const submitOnce = () => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
     if (role === 'host') {
-      HostService.submitHostAnswers(answers);
-      HostService.endRound();
+      HostService.submitHostAnswers(answersRef.current);
     } else {
-      ClientService.submitAnswers(answers);
+      ClientService.submitAnswers(answersRef.current);
     }
   };
 
-  if (waiting) {
+  const onStopPressed = () => setShowStopConfirm(true);
+
+  const confirmStop = () => {
+    setShowStopConfirm(false);
+    submitOnce();
+    if (role === 'host') {
+      HostService.requestStop();
+    } else {
+      ClientService.sendStop();
+    }
+  };
+
+  const confirmExit = () => {
+    setShowExitConfirm(false);
+    if (role === 'host') HostService.stop();
+    else ClientService.disconnect();
+    navigation.replace('Home');
+  };
+
+  const setAnswer = (cat: string, val: string) =>
+    setAnswers(prev => ({ ...prev, [cat]: val }));
+
+  const timerColor = useMemo(() => {
+    if (remaining <= 10) return Colors.danger;
+    if (remaining <= 30) return Colors.warning;
+    return Colors.accent;
+  }, [remaining]);
+
+  // ----- Loading state: round hasn't started broadcasting to us yet -----
+  if (!letter) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.waiting}>در انتظار شروع دور توسط میزبان…</Text>
-      </View>
+      <SafeAreaView style={styles.safe} edges={['bottom']}>
+        <View style={styles.centered}>
+          <Text style={styles.bigMuted}>در انتظار شروع دور…</Text>
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.letter}>{letter}</Text>
-        <Text style={styles.timer}>{secondsLeft} ثانیه</Text>
+    <SafeAreaView style={styles.safe} edges={['bottom']}>
+      <View style={styles.headerCard}>
+        <View style={styles.letterBadge}>
+          <Text style={styles.letterText}>{letter}</Text>
+        </View>
+        <View style={{ flex: 1, alignItems: 'flex-start' }}>
+          <Text style={styles.timerLabel}>زمان باقی‌مانده</Text>
+          <Text style={[styles.timerValue, { color: timerColor }]}>{remaining}s</Text>
+        </View>
       </View>
 
-      {CATEGORIES.map(cat => (
-        <View key={cat} style={styles.row}>
-          <Text style={styles.cat}>{cat}</Text>
-          <TextInput
-            style={styles.input}
-            value={answers[cat] || ''}
-            onChangeText={(v) => setField(cat, v)}
-            editable={!submitted}
-            placeholder={`با حرف ${letter}`}
-            placeholderTextColor="#475569"
-          />
-        </View>
-      ))}
+      <ScrollView
+        contentContainerStyle={styles.list}
+        keyboardShouldPersistTaps="handled"
+      >
+        {CATEGORIES.map(cat => (
+          <View key={cat} style={styles.row}>
+            <Text style={styles.rowLabel}>{cat}</Text>
+            <TextInput
+              style={[styles.rowInput, locked && styles.rowInputLocked]}
+              value={answers[cat] || ''}
+              onChangeText={(t) => setAnswer(cat, t)}
+              editable={!locked}
+              placeholder={`با «${letter}» شروع شود`}
+              placeholderTextColor={Colors.textDim}
+              maxLength={30}
+            />
+          </View>
+        ))}
 
-      <Button title={submitted ? 'ارسال شد ✓' : (role==='host' ? 'پایان دور (ارسال همه)' : 'ارسال جواب‌ها')} onPress={doSubmit} disabled={submitted}/>
-    </ScrollView>
+        <View style={{ height: Spacing.lg }} />
+
+        <Button
+          title={waitingForResults ? 'در حال جمع‌آوری پاسخ‌ها…' : '🛑 استاپ! (پایان دور)'}
+          variant="danger"
+          loading={waitingForResults}
+          disabled={locked}
+          onPress={onStopPressed}
+        />
+      </ScrollView>
+
+      <Modal
+        visible={showStopConfirm}
+        title="پایان دور؟"
+        message="با زدن استاپ، دور برای همه‌ی بازیکنان به‌پایان می‌رسد و پاسخ‌ها نمره‌دهی می‌شوند."
+        confirmText="بله، استاپ"
+        cancelText="ادامه می‌دهم"
+        variant="danger"
+        onConfirm={confirmStop}
+        onCancel={() => setShowStopConfirm(false)}
+      />
+
+      <Modal
+        visible={showExitConfirm}
+        title="خروج از بازی؟"
+        message={role === 'host'
+          ? 'با خروج، میزبانی پایان می‌یابد و همه‌ی بازیکنان قطع می‌شوند.'
+          : 'با خروج از بازی، اتصال شما به میزبان قطع می‌شود.'}
+        confirmText="بله، خارج شو"
+        cancelText="در بازی می‌مانم"
+        variant="danger"
+        onConfirm={confirmExit}
+        onCancel={() => setShowExitConfirm(false)}
+      />
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding:20 },
-  center: { flex:1, alignItems:'center', justifyContent:'center', padding:20 },
-  waiting: { color:'#94a3b8', fontSize:18, fontFamily:'Vazir' },
-  header: { flexDirection:'row-reverse', justifyContent:'space-between', alignItems:'center', marginBottom:16, backgroundColor:'#1e293b', padding:14, borderRadius:14 },
-  letter: { color:'#10b981', fontSize:50, fontFamily:'Vazir' },
-  timer: { color:'#fff', fontSize:22, fontFamily:'Vazir' },
-  row: { marginBottom:10 },
-  cat: { color:'#cbd5e1', fontSize:16, marginBottom:4, fontFamily:'Vazir' },
-  input: { backgroundColor:'#1e293b', color:'#fff', padding:12, borderRadius:10, fontSize:18, fontFamily:'Vazir', textAlign:'right' },
+  safe: { flex: 1, backgroundColor: Colors.bg },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  bigMuted: { fontFamily: Font.bold, fontSize: 18, color: Colors.textMuted },
+
+  headerCard: {
+    margin: Spacing.lg,
+    padding: Spacing.md,
+    backgroundColor: Colors.card,
+    borderRadius: Radius.xl,
+    borderWidth: 1, borderColor: Colors.border,
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: Spacing.md,
+    ...Shadow.card,
+  },
+  letterBadge: {
+    width: 76, height: 76,
+    borderRadius: 38,
+    backgroundColor: Colors.primary,
+    alignItems: 'center', justifyContent: 'center',
+    ...Shadow.soft,
+  },
+  letterText: { fontFamily: Font.bold, fontSize: 44, color: '#fff', marginTop: -4 },
+  timerLabel: { fontFamily: Font.regular, fontSize: 12, color: Colors.textMuted },
+  timerValue: { fontFamily: Font.bold, fontSize: 30, marginTop: 2 },
+
+  list: { paddingHorizontal: Spacing.lg, paddingBottom: Spacing.xl, gap: 10 },
+
+  row: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    backgroundColor: Colors.card,
+    borderRadius: Radius.md,
+    borderWidth: 1, borderColor: Colors.border,
+    paddingHorizontal: Spacing.md,
+    height: 54,
+  },
+  rowLabel: {
+    fontFamily: Font.bold,
+    fontSize: 14,
+    color: Colors.accent,
+    width: 64,
+    textAlign: 'right',
+  },
+  rowInput: {
+    flex: 1,
+    fontFamily: Font.regular,
+    fontSize: 16,
+    color: Colors.text,
+    textAlign: 'right',
+    paddingHorizontal: Spacing.sm,
+  },
+  rowInputLocked: { color: Colors.textMuted },
 });
