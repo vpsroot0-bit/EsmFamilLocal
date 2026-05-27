@@ -1,0 +1,78 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('frontend/package-lock.json','frontend/package.json') }}
+
+      - name: Install JS dependencies
+        working-directory: frontend
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+
+      - name: Download Vazir font
+        working-directory: frontend
+        run: |
+          mkdir -p assets/fonts
+          if [ ! -s assets/fonts/Vazir.ttf ]; then
+            curl -L -o assets/fonts/Vazir.ttf \
+              https://github.com/rastikerdar/vazir-font/raw/master/dist/Farsi-Digits/Vazir-FD.ttf
+          fi
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate Gradle wrapper if missing
+        working-directory: frontend/android
+        run: |
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version 8.8
+          fi
+          chmod +x gradlew
+
+      - name: Pre-bundle JS (best effort)
+        working-directory: frontend
+        run: |
+          mkdir -p android/app/src/main/assets
+          npx react-native bundle \
+            --platform android \
+            --dev false \
+            --entry-file index.js \
+            --bundle-output android/app/src/main/assets/index.android.bundle \
+            --assets-dest android/app/src/main/res || true
+
+      - name: Build Debug APK
+        working-directory: frontend/android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: EsmFamilLocal-debug-apk
+          path: frontend/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
