@@ -1,79 +1,161 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, TextInput, StyleSheet, FlatList, Alert, ActivityIndicator } from 'react-native';
-import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../../App';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TextInput, Pressable, Alert } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
 import Button from '../components/Button';
 import ClientService, { Discovered } from '../services/ClientService';
-import { requestNetworkPermissions } from '../utils/permissions';
+import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
 import { PORT } from '../utils/constants';
+import { loadSettings, saveSettings } from '../utils/settings';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Join'>;
-
-export default function JoinScreen({ navigation }: Props) {
+export default function JoinScreen({ navigation }: any) {
   const [name, setName] = useState('');
-  const [manualIp, setManualIp] = useState('');
+  const [manualHost, setManualHost] = useState('');
   const [discovered, setDiscovered] = useState<Discovered[]>([]);
-  const [scanning, setScanning] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const isMounted = useRef(true);
 
   useEffect(() => {
-    const off = ClientService.on((ev) => {
-      if (ev.type === 'CONNECTED') navigation.navigate('Game', { role: 'client', name });
-      if (ev.type === 'ERROR') Alert.alert('خطا', ev.message);
+    isMounted.current = true;
+    loadSettings().then(s => {
+      if (isMounted.current && s.playerName) setName(s.playerName);
     });
-    return () => { off(); ClientService.stopDiscovery(); };
-  }, [navigation, name]);
 
-  const startScan = async () => {
-    if (!name.trim()) { Alert.alert('نام لازم است', 'لطفاً ابتدا نام خود را وارد کنید.'); return; }
-    await requestNetworkPermissions();
-    setScanning(true);
-    setDiscovered([]);
     ClientService.startDiscovery((s) => {
-      setDiscovered(prev => (prev.find(x => x.host === s.host) ? prev : [...prev, s]));
+      if (!isMounted.current) return;
+      setDiscovered(prev => {
+        if (prev.find(x => x.host === s.host && x.port === s.port)) return prev;
+        return [...prev, s];
+      });
     });
-    setTimeout(() => setScanning(false), 8000);
-  };
 
-  const connect = (host: string, port: number = PORT) => {
-    if (!name.trim()) { Alert.alert('نام لازم است'); return; }
+    const off = ClientService.on((ev: any) => {
+      if (!isMounted.current) return;
+      if (ev.type === 'CONNECTED') {
+        setConnecting(false);
+        // Persist name for next time.
+        saveSettings({ playerName: name.trim() }).catch(() => {});
+        navigation.replace('Game', { role: 'client' });
+      } else if (ev.type === 'ERROR') {
+        setConnecting(false);
+        Alert.alert('خطا در اتصال', ev.message || '');
+      } else if (ev.type === 'DISCONNECTED' && connecting) {
+        setConnecting(false);
+        Alert.alert('قطع اتصال', 'اتصال به میزبان برقرار نشد.');
+      }
+    });
+
+    return () => {
+      isMounted.current = false;
+      ClientService.stopDiscovery();
+      off();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const connectTo = (host: string, port: number) => {
+    if (!name.trim()) {
+      Alert.alert('خطا', 'لطفاً نام خود را وارد کنید.');
+      return;
+    }
+    setConnecting(true);
     ClientService.connect(host, port, name.trim());
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.label}>نام شما</Text>
-      <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="مثلاً سارا" placeholderTextColor="#64748b"/>
+    <SafeAreaView style={styles.safe} edges={['bottom']}>
+      <ScrollView contentContainerStyle={styles.container}>
+        <View style={styles.card}>
+          <Text style={styles.label}>نام شما</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="مثلاً سارا"
+            placeholderTextColor={Colors.textDim}
+            value={name}
+            onChangeText={setName}
+            maxLength={20}
+          />
+        </View>
 
-      <Button title={scanning ? 'در حال جستجو…' : 'جستجوی خودکار بازی'} onPress={startScan} />
-      {scanning && <ActivityIndicator color="#10b981" style={{ marginVertical: 6 }} />}
+        <View style={styles.card}>
+          <Text style={styles.title}>بازی‌های پیدا شده در شبکه</Text>
+          {discovered.length === 0 ? (
+            <Text style={styles.muted}>در حال جستجو…</Text>
+          ) : (
+            discovered.map((s) => (
+              <Pressable
+                key={s.host + s.port}
+                style={styles.discoverRow}
+                onPress={() => connectTo(s.host, s.port)}
+              >
+                <View>
+                  <Text style={styles.gameName}>{s.name.replace('EsmFamil_', '')}</Text>
+                  <Text style={styles.gameAddr}>{s.host}:{s.port}</Text>
+                </View>
+                <Text style={styles.joinTag}>پیوستن →</Text>
+              </Pressable>
+            ))
+          )}
+        </View>
 
-      <Text style={styles.section}>بازی‌های پیدا شده</Text>
-      <FlatList
-        data={discovered}
-        keyExtractor={(d) => d.host + d.port}
-        ListEmptyComponent={<Text style={styles.empty}>هیچ بازی پیدا نشد. اگر طول کشید از IP دستی استفاده کنید.</Text>}
-        renderItem={({item}) => (
-          <View style={styles.row}>
-            <Text style={styles.foundName}>{item.name.replace('EsmFamil_','')}  ({item.host})</Text>
-            <Button title="اتصال" onPress={() => connect(item.host, item.port)} />
-          </View>
-        )}
-        style={{ flexGrow: 0, maxHeight: 200 }}
-      />
-
-      <Text style={styles.section}>اتصال دستی</Text>
-      <TextInput style={styles.input} value={manualIp} onChangeText={setManualIp} placeholder="IP میزبان مثلاً 192.168.43.1" placeholderTextColor="#64748b" autoCapitalize="none" keyboardType="numeric"/>
-      <Button title="اتصال با IP" onPress={() => manualIp && connect(manualIp.trim(), PORT)} variant="ghost"/>
-    </View>
+        <View style={styles.card}>
+          <Text style={styles.title}>اتصال دستی با IP</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="192.168.1.10"
+            placeholderTextColor={Colors.textDim}
+            value={manualHost}
+            onChangeText={setManualHost}
+            keyboardType="numeric"
+            autoCapitalize="none"
+          />
+          <Button
+            title={connecting ? 'در حال اتصال…' : 'اتصال'}
+            loading={connecting}
+            onPress={() => manualHost && connectTo(manualHost.trim(), PORT)}
+          />
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex:1, padding:20 },
-  label: { color:'#cbd5e1', fontSize:16, marginBottom:6, fontFamily:'Vazir' },
-  input: { backgroundColor:'#1e293b', color:'#fff', padding:12, borderRadius:10, fontSize:18, marginBottom:10, fontFamily:'Vazir', textAlign:'right' },
-  section: { color:'#10b981', fontSize:16, marginTop:14, marginBottom:6, fontFamily:'Vazir' },
-  row: { flexDirection:'row-reverse', alignItems:'center', justifyContent:'space-between', backgroundColor:'#1e293b', padding:10, borderRadius:10, marginBottom:6 },
-  foundName: { color:'#fff', fontSize:16, fontFamily:'Vazir' },
-  empty: { color:'#64748b', fontFamily:'Vazir', textAlign:'center', paddingVertical:10 },
+  safe: { flex: 1, backgroundColor: Colors.bg },
+  container: { padding: Spacing.lg, gap: Spacing.md },
+
+  card: {
+    backgroundColor: Colors.card,
+    borderRadius: Radius.lg,
+    padding: Spacing.lg,
+    borderWidth: 1, borderColor: Colors.border,
+    ...Shadow.soft,
+    gap: Spacing.sm,
+  },
+  title: { fontFamily: Font.bold, fontSize: 16, color: Colors.text, textAlign: 'right' },
+  label: { fontFamily: Font.bold, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
+  input: {
+    backgroundColor: Colors.bgElevated,
+    color: Colors.text,
+    fontFamily: Font.regular,
+    fontSize: 16,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 12,
+    borderWidth: 1, borderColor: Colors.border,
+    textAlign: 'right',
+    marginBottom: Spacing.sm,
+  },
+  muted: { fontFamily: Font.regular, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
+
+  discoverRow: {
+    flexDirection: 'row-reverse',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: Colors.border,
+  },
+  gameName: { fontFamily: Font.bold, fontSize: 16, color: Colors.text, textAlign: 'right' },
+  gameAddr: { fontFamily: Font.regular, fontSize: 12, color: Colors.textDim, textAlign: 'right', marginTop: 2 },
+  joinTag: { fontFamily: Font.bold, fontSize: 14, color: Colors.accent },
 });
