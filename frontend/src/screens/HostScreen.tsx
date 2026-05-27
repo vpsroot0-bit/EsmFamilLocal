@@ -1,78 +1,181 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, TextInput, StyleSheet, FlatList, Alert } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TextInput, Alert } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { NetworkInfo } from 'react-native-network-info';
-import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../../App';
+
 import Button from '../components/Button';
 import HostService from '../services/HostService';
-import { requestNetworkPermissions } from '../utils/permissions';
-import { PORT } from '../utils/constants';
+import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
+import { loadSettings } from '../utils/settings';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Host'>;
-
-export default function HostScreen({ navigation }: Props) {
-  const [name, setName] = useState('');
+export default function HostScreen({ navigation }: any) {
   const [started, setStarted] = useState(false);
-  const [players, setPlayers] = useState<{id:string;name:string}[]>([]);
+  const [hostName, setHostName] = useState('');
+  const [players, setPlayers] = useState<{ id: string; name: string }[]>([]);
   const [ip, setIp] = useState<string | null>(null);
+  const [roundSeconds, setRoundSeconds] = useState(90);
+  const isMounted = useRef(true);
 
   useEffect(() => {
-    NetworkInfo.getIPV4Address().then(setIp).catch(() => {});
-    const off = HostService.on((ev) => {
-      if (ev.type === 'LOBBY') setPlayers(ev.players);
-      if (ev.type === 'ROUND_START') {
-        navigation.navigate('Game', { role: 'host', name: name || 'میزبان' });
-      }
-      if (ev.type === 'ERROR') Alert.alert('خطا', ev.message);
+    isMounted.current = true;
+    loadSettings().then(s => {
+      if (!isMounted.current) return;
+      setRoundSeconds(s.roundSeconds);
+      if (s.playerName) setHostName(s.playerName);
+    });
+    NetworkInfo.getIPV4Address().then(addr => {
+      if (isMounted.current) setIp(addr || null);
+    });
+    return () => { isMounted.current = false; };
+  }, []);
+
+  // Subscribe to host events. CRITICAL: we DO NOT navigate away on ROUND_START here.
+  // GameScreen pulls round state directly from HostService.getCurrentRound() on mount.
+  useEffect(() => {
+    const off = HostService.on((ev: any) => {
+      if (ev.type === 'LOBBY') setPlayers(ev.players || []);
     });
     return () => { off(); };
-  }, [name, navigation]);
+  }, []);
 
-  const onHost = async () => {
-    if (!name.trim()) { Alert.alert('نام لازم است', 'لطفاً نام خود را وارد کنید.'); return; }
-    const ok = await requestNetworkPermissions();
-    if (!ok) Alert.alert('اجازه لازم است', 'برای کشف خودکار به اجازه‌های شبکه نیاز است. می‌توانید همچنان با وارد کردن IP دستی بازی کنید.');
-    await HostService.start(name.trim());
-    setStarted(true);
+  // Cleanup host server only if user leaves AND we haven't transitioned to Game.
+  // We rely on explicit navigation; HostService persists across the navigation stack.
+  // Server is fully torn down only when user explicitly taps "پایان میزبانی".
+
+  const start = async () => {
+    if (!hostName.trim()) {
+      Alert.alert('خطا', 'لطفاً نام میزبان را وارد کنید.');
+      return;
+    }
+    try {
+      await HostService.start(hostName.trim());
+      setStarted(true);
+    } catch (e: any) {
+      Alert.alert('خطا در راه‌اندازی', String(e?.message || e));
+    }
   };
 
-  const onStartRound = () => HostService.startRound();
-  const onCancel = () => { HostService.stop(); navigation.goBack(); };
+  const stopHosting = () => {
+    HostService.stop();
+    setStarted(false);
+    setPlayers([]);
+    navigation.goBack();
+  };
+
+  const startRound = () => {
+    if (players.length < 1) {
+      Alert.alert('بازیکنی نیست', 'حداقل یک بازیکن لازم است.');
+      return;
+    }
+    // 1) Navigate FIRST so GameScreen mounts and subscribes.
+    navigation.navigate('Game', { role: 'host' });
+    // 2) Start the round on next tick so the GameScreen listener is ready
+    //    to receive STOP_TRIGGERED/ROUND_END, and so getCurrentRound() returns the snapshot.
+    setTimeout(() => HostService.startRound(roundSeconds), 50);
+  };
 
   return (
-    <View style={styles.container}>
-      {!started ? (
-        <>
-          <Text style={styles.label}>نام شما</Text>
-          <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="مثلاً علی" placeholderTextColor="#64748b"/>
-          <Button title="ساخت بازی" onPress={onHost} />
-        </>
-      ) : (
-        <>
-          <Text style={styles.title}>اتاق آماده است</Text>
-          <Text style={styles.info}>IP میزبان: {ip || '—'}    پورت: {PORT}</Text>
-          <Text style={styles.info}>بازیکنان دیگر گزینه «پیوستن به بازی» را در گوشی خود بزنند.</Text>
-          <Text style={styles.section}>بازیکنان حاضر ({players.length})</Text>
-          <FlatList
-            data={players}
-            keyExtractor={(p) => p.id}
-            renderItem={({item}) => <Text style={styles.player}>• {item.name}</Text>}
-            style={{ flexGrow: 0, maxHeight: 220 }}
-          />
-          <Button title="شروع دور جدید" onPress={onStartRound} disabled={players.length < 1} />
-          <Button title="لغو و بازگشت" onPress={onCancel} variant="danger" />
-        </>
-      )}
-    </View>
+    <SafeAreaView style={styles.safe} edges={['bottom']}>
+      <ScrollView contentContainerStyle={styles.container}>
+        {!started ? (
+          <View style={styles.card}>
+            <Text style={styles.label}>نام شما (میزبان)</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="مثلاً علی"
+              placeholderTextColor={Colors.textDim}
+              value={hostName}
+              onChangeText={setHostName}
+              maxLength={20}
+            />
+            <Button title="شروع میزبانی" onPress={start} />
+          </View>
+        ) : (
+          <>
+            <View style={styles.card}>
+              <Text style={styles.title}>منتظر بازیکن‌ها…</Text>
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>آدرس IP این دستگاه</Text>
+                <Text style={styles.infoValue}>{ip || '—'}</Text>
+              </View>
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>مدت هر دور</Text>
+                <Text style={styles.infoValue}>{roundSeconds} ثانیه</Text>
+              </View>
+              <Text style={styles.hint}>
+                بازیکن‌ها از بخش «پیوستن به بازی» می‌توانند بازی شما را پیدا کنند.
+              </Text>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.title}>بازیکنان متصل ({players.length})</Text>
+              {players.length === 0 ? (
+                <Text style={styles.muted}>هنوز کسی وصل نشده است…</Text>
+              ) : (
+                players.map(p => (
+                  <View key={p.id} style={styles.playerRow}>
+                    <Text style={styles.playerName}>{p.name}</Text>
+                    <Text style={styles.playerTag}>{p.id === 'host' ? 'میزبان' : 'متصل'}</Text>
+                  </View>
+                ))
+              )}
+            </View>
+
+            <View style={{ gap: 12 }}>
+              <Button title="🎲 شروع دور جدید" onPress={startRound} />
+              <Button title="پایان میزبانی" variant="danger" onPress={stopHosting} />
+            </View>
+          </>
+        )}
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex:1, padding:20 },
-  label: { color:'#cbd5e1', fontSize:16, marginBottom:6, fontFamily:'Vazir' },
-  input: { backgroundColor:'#1e293b', color:'#fff', padding:12, borderRadius:10, fontSize:18, marginBottom:14, fontFamily:'Vazir', textAlign:'right' },
-  title: { color:'#fff', fontSize:24, marginVertical:10, fontFamily:'Vazir' },
-  info: { color:'#94a3b8', fontSize:14, marginBottom:6, fontFamily:'Vazir' },
-  section: { color:'#10b981', fontSize:16, marginTop:14, marginBottom:6, fontFamily:'Vazir' },
-  player: { color:'#fff', fontSize:18, paddingVertical:4, fontFamily:'Vazir' },
+  safe: { flex: 1, backgroundColor: Colors.bg },
+  container: { padding: Spacing.lg, gap: Spacing.md },
+
+  card: {
+    backgroundColor: Colors.card,
+    borderRadius: Radius.lg,
+    padding: Spacing.lg,
+    borderWidth: 1, borderColor: Colors.border,
+    ...Shadow.soft,
+    gap: Spacing.sm,
+  },
+  title: { fontFamily: Font.bold, fontSize: 18, color: Colors.text, textAlign: 'right' },
+  label: { fontFamily: Font.bold, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
+  input: {
+    backgroundColor: Colors.bgElevated,
+    color: Colors.text,
+    fontFamily: Font.regular,
+    fontSize: 16,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 12,
+    borderWidth: 1, borderColor: Colors.border,
+    textAlign: 'right',
+    marginBottom: Spacing.sm,
+  },
+  hint: { fontFamily: Font.regular, fontSize: 12, color: Colors.textDim, textAlign: 'right', marginTop: 6 },
+  muted: { fontFamily: Font.regular, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
+
+  infoRow: {
+    flexDirection: 'row-reverse',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  infoLabel: { fontFamily: Font.regular, fontSize: 13, color: Colors.textMuted },
+  infoValue: { fontFamily: Font.bold, fontSize: 15, color: Colors.accent },
+
+  playerRow: {
+    flexDirection: 'row-reverse',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: Colors.border,
+  },
+  playerName: { fontFamily: Font.bold, fontSize: 15, color: Colors.text },
+  playerTag: { fontFamily: Font.regular, fontSize: 12, color: Colors.success },
 });
