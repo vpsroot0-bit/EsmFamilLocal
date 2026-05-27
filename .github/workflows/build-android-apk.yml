@@ -43,7 +43,6 @@ jobs:
               https://github.com/rastikerdar/vazir-font/raw/master/dist/Farsi-Digits/Vazir-FD.ttf
           fi
 
-      # ⬇️ این بخش جایگزین "Set up Gradle" و "Generate Gradle wrapper" قبلی شد
       - name: Install Gradle wrapper from RN template (avoids system Gradle 9.x)
         working-directory: frontend/android
         run: |
@@ -56,7 +55,6 @@ jobs:
           cp "$TEMPLATE/gradlew.bat" ./gradlew.bat 2>/dev/null || true
           mkdir -p gradle/wrapper
           cp "$TEMPLATE/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/gradle-wrapper.jar
-          # نگه داشتن gradle-wrapper.properties خودمان (پین شده روی 8.8)
           if [ ! -f gradle/wrapper/gradle-wrapper.properties ]; then
             cp "$TEMPLATE/gradle/wrapper/gradle-wrapper.properties" gradle/wrapper/gradle-wrapper.properties
           fi
@@ -71,6 +69,21 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('frontend/android/**/*.gradle*', 'frontend/android/**/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Generate debug.keystore
+        working-directory: frontend/android/app
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
 
       - name: Bundle JS for Android
         working-directory: frontend
