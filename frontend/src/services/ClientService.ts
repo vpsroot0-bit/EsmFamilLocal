@@ -1,6 +1,7 @@
 import TcpSocket from 'react-native-tcp-socket';
 import Zeroconf from 'react-native-zeroconf';
 import { PORT, SERVICE_TYPE } from '../utils/constants';
+import type { RoundSnapshot } from './HostService';
 
 type Listener = (event: any) => void;
 export type Discovered = { name: string; host: string; port: number };
@@ -10,10 +11,29 @@ class ClientService {
   private buffer = '';
   private listeners: Set<Listener> = new Set();
   private zeroconf: Zeroconf | null = null;
+
+  private currentRound: RoundSnapshot | null = null;
   playerName = '';
 
   on(l: Listener) { this.listeners.add(l); return () => this.listeners.delete(l); }
-  private emit(ev: any) { this.listeners.forEach(l => l(ev)); }
+  private emit(ev: any) {
+    // Cache round state so GameScreen can hydrate on mount.
+    if (ev?.type === 'ROUND_START') {
+      this.currentRound = {
+        letter: ev.letter,
+        endsAt: ev.endsAt,
+        durationMs: ev.durationMs,
+        categories: ev.categories,
+      };
+    } else if (ev?.type === 'ROUND_END' || ev?.type === 'DISCONNECTED') {
+      this.currentRound = null;
+    }
+    this.listeners.forEach(l => l(ev));
+  }
+
+  getCurrentRound(): RoundSnapshot | null {
+    return this.currentRound;
+  }
 
   startDiscovery(onFound: (s: Discovered) => void) {
     try {
@@ -25,13 +45,13 @@ class ClientService {
         if (!host) return;
         onFound({ name, host, port: service.port || PORT });
       });
-      this.zeroconf.on('error', () => {});
+      this.zeroconf.on('error', () => { /* ignore */ });
       this.zeroconf.scan(SERVICE_TYPE, 'tcp', 'local.');
-    } catch {}
+    } catch { /* ignore */ }
   }
 
   stopDiscovery() {
-    try { this.zeroconf?.stop(); } catch {}
+    try { this.zeroconf?.stop(); } catch { /* ignore */ }
     this.zeroconf = null;
   }
 
@@ -52,22 +72,27 @@ class ClientService {
     this.buffer = parts.pop() || '';
     for (const line of parts) {
       if (!line.trim()) continue;
-      try { this.emit(JSON.parse(line)); } catch {}
+      try { this.emit(JSON.parse(line)); } catch { /* ignore */ }
     }
   }
 
   send(msg: any) {
-    try { this.socket?.write(JSON.stringify(msg) + '\n'); } catch {}
+    try { this.socket?.write(JSON.stringify(msg) + '\n'); } catch { /* ignore */ }
   }
 
   submitAnswers(answers: Record<string, string>) {
     this.send({ type: 'ANSWERS', answers });
   }
 
+  sendStop() {
+    this.send({ type: 'STOP' });
+  }
+
   disconnect() {
-    try { this.socket?.destroy(); } catch {}
+    try { this.socket?.destroy(); } catch { /* ignore */ }
     this.socket = null;
     this.buffer = '';
+    this.currentRound = null;
   }
 }
 
