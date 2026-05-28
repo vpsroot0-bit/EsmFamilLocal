@@ -1,0 +1,140 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.8'
+
+      - name: Install JS dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Download fonts
+        run: |
+          mkdir -p assets/fonts
+          if [ ! -s assets/fonts/IRANSans.ttf ]; then
+            curl -L -o assets/fonts/IRANSans.ttf \
+              https://github.com/rastikerdar/vazirmatn/raw/v33.003/fonts/ttf/Vazirmatn-Regular.ttf
+          fi
+          if [ ! -s assets/fonts/IRANSans-Bold.ttf ]; then
+            curl -L -o assets/fonts/IRANSans-Bold.ttf \
+              https://github.com/rastikerdar/vazirmatn/raw/v33.003/fonts/ttf/Vazirmatn-Bold.ttf
+          fi
+
+      - name: Download sound effects
+        run: |
+          mkdir -p assets/sounds
+          if [ ! -s assets/sounds/start.mp3 ]; then
+            curl -L -o assets/sounds/start.mp3 \
+              "https://assets.mixkit.co/active_storage/sfx/2018/2018-preview.mp3"
+          fi
+          if [ ! -s assets/sounds/stop.mp3 ]; then
+            curl -L -o assets/sounds/stop.mp3 \
+              "https://assets.mixkit.co/active_storage/sfx/2870/2870-preview.mp3"
+          fi
+          if [ ! -s assets/sounds/tick.mp3 ]; then
+            curl -L -o assets/sounds/tick.mp3 \
+              "https://assets.mixkit.co/active_storage/sfx/1064/1064-preview.mp3"
+          fi
+          if [ ! -s assets/sounds/win.mp3 ]; then
+            curl -L -o assets/sounds/win.mp3 \
+              "https://assets.mixkit.co/active_storage/sfx/270/270-preview.mp3"
+          fi
+          if [ ! -s assets/sounds/join.mp3 ]; then
+            curl -L -o assets/sounds/join.mp3 \
+              "https://assets.mixkit.co/active_storage/sfx/1115/1115-preview.mp3"
+          fi
+          ls -la assets/sounds/
+
+      - name: Create Android debug keystore
+        run: |
+          mkdir -p android/app
+          if [ ! -f android/app/debug.keystore ]; then
+            keytool -genkey -v -keystore android/app/debug.keystore \
+              -storepass android -alias androiddebugkey \
+              -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Link native assets (fonts + sounds)
+        run: npx react-native-asset || true
+
+      - name: Bundle JS
+        run: |
+          mkdir -p android/app/src/main/assets
+          npx react-native bundle \
+            --platform android \
+            --dev false \
+            --entry-file index.js \
+            --bundle-output android/app/src/main/assets/index.android.bundle \
+            --assets-dest android/app/src/main/res
+
+      - name: Configure Android SDK path
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          cat android/local.properties
+
+      - name: Disable New Architecture in gradle.properties
+        run: |
+          # Ensure newArchEnabled and hermesEnabled are stable for CI
+          if [ -f android/gradle.properties ]; then
+            sed -i 's/^newArchEnabled=.*/newArchEnabled=false/' android/gradle.properties
+            grep -q '^newArchEnabled=' android/gradle.properties || echo 'newArchEnabled=false' >> android/gradle.properties
+            grep -q '^hermesEnabled=' android/gradle.properties || echo 'hermesEnabled=true' >> android/gradle.properties
+          fi
+          echo "--- gradle.properties ---"
+          cat android/gradle.properties || true
+
+      - name: Generate React Native autolinking config
+        run: |
+          mkdir -p android/build/generated/autolinking
+          npx @react-native-community/cli config > android/build/generated/autolinking/autolinking.json
+          echo "✅ autolinking.json generated ($(wc -c < android/build/generated/autolinking/autolinking.json) bytes)"
+          # Sanity check: must be valid JSON
+          node -e "JSON.parse(require('fs').readFileSync('android/build/generated/autolinking/autolinking.json','utf8')); console.log('✅ Valid JSON')"
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          if [ ! -f gradlew ]; then
+            echo "Gradle wrapper not found, generating one..."
+            gradle wrapper --gradle-version 8.8 --distribution-type bin
+          fi
+          chmod +x gradlew
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            -PnewArchEnabled=false
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: EsmFamilLocal-debug-apk
+          path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
