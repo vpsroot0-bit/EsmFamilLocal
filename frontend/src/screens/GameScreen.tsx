@@ -1,266 +1,217 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TextInput, BackHandler } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  View, Text, StyleSheet, ScrollView, TextInput, BackHandler,
+} from 'react-native';
 import Button from '../components/Button';
-import Modal from '../components/Modal';
+import AppModal from '../components/Modal';
+import { Colors, Font, Spacing, Radius } from '../theme';
 import HostService from '../services/HostService';
 import ClientService from '../services/ClientService';
-import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
 import { CATEGORIES } from '../utils/constants';
+import { play } from '../utils/sounds';
 
-type Role = 'host' | 'client';
+type Mode = 'host' | 'client';
 
-export default function GameScreen({ navigation, route }: any) {
-  const role: Role = route.params?.role || 'client';
+export default function GameScreen({ route, navigation }: any) {
+  const mode: Mode = route.params?.mode || 'client';
+  const myName: string = route.params?.hostName || route.params?.playerName || 'بازیکن';
 
   const [letter, setLetter] = useState<string>('');
-  const [endsAt, setEndsAt] = useState<number>(0);
-  const [remaining, setRemaining] = useState<number>(0);
+  const [roundIdx, setRoundIdx] = useState(0);
+  const [totalRounds, setTotalRounds] = useState(0);
+  const [remaining, setRemaining] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [locked, setLocked] = useState(false);
-  const [showStopConfirm, setShowStopConfirm] = useState(false);
-  const [showExitConfirm, setShowExitConfirm] = useState(false);
-  const [waitingForResults, setWaitingForResults] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [exitOpen, setExitOpen] = useState(false);
+  const lastTickRef = useRef(0);
 
-  const answersRef = useRef(answers);
-  answersRef.current = answers;
-  const submittedRef = useRef(false);
-
-  // ----- Hydrate round state on mount (CRITICAL FIX) -----
-  // Previously the host could miss its own ROUND_START because the listener
-  // was attached after the broadcast. Now we read the current snapshot directly.
   useEffect(() => {
-    const snap = role === 'host'
-      ? HostService.getCurrentRound()
-      : ClientService.getCurrentRound();
+    const svc: any = mode === 'host' ? HostService : ClientService;
 
-    if (snap) {
-      setLetter(snap.letter);
-      setEndsAt(snap.endsAt);
-      setRemaining(Math.max(0, Math.ceil((snap.endsAt - Date.now()) / 1000)));
-    }
-  }, [role]);
+    // sync if mid-round
+    const cur = svc.getCurrentRound?.();
+    if (cur) applyRoundStart(cur.letter, cur.endsAt, cur.index, cur.total);
 
-  // ----- Subscribe to live events -----
-  useEffect(() => {
-    const handle = (ev: any) => {
+    const off = svc.on((ev: any) => {
       if (ev.type === 'ROUND_START') {
-        setLetter(ev.letter);
-        setEndsAt(ev.endsAt);
-        setRemaining(Math.max(0, Math.ceil((ev.endsAt - Date.now()) / 1000)));
-        setAnswers({});
-        setLocked(false);
-        setWaitingForResults(false);
-        submittedRef.current = false;
+        applyRoundStart(ev.letter, ev.endsAt, ev.index, ev.total);
       } else if (ev.type === 'STOP_TRIGGERED') {
-        // Someone stopped. Lock UI, auto-submit current answers, wait for ROUND_END.
-        setLocked(true);
-        setWaitingForResults(true);
-        submitOnce();
+        setStopping(true);
+        play('stop');
+        submitMine();
       } else if (ev.type === 'ROUND_END') {
-        setWaitingForResults(false);
-        navigation.replace('Score', { letter: ev.letter, results: ev.results, role });
-      } else if (ev.type === 'DISCONNECTED' && role === 'client') {
-        navigation.replace('Home');
+        navigation.replace('Score', {
+          mode,
+          results: ev.results,
+          letter: ev.letter,
+          index: ev.index,
+          total: ev.total,
+          isLast: ev.isLast,
+          standings: ev.standings,
+        });
       }
-    };
+    });
 
-    const off = role === 'host' ? HostService.on(handle) : ClientService.on(handle);
-    return () => { off(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role]);
-
-  // ----- Countdown ticker -----
-  useEffect(() => {
-    if (!endsAt) return;
-    const id = setInterval(() => {
-      const r = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-      setRemaining(r);
-      if (r === 0) clearInterval(id);
-    }, 250);
-    return () => clearInterval(id);
-  }, [endsAt]);
-
-  // ----- Hardware back button: confirm exit -----
-  useEffect(() => {
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      setShowExitConfirm(true);
+    const back = BackHandler.addEventListener('hardwareBackPress', () => {
+      setExitOpen(true);
       return true;
     });
-    return () => sub.remove();
+
+    return () => {
+      off();
+      back.remove();
+    };
   }, []);
 
-  const submitOnce = () => {
-    if (submittedRef.current) return;
-    submittedRef.current = true;
-    if (role === 'host') {
-      HostService.submitHostAnswers(answersRef.current);
-    } else {
-      ClientService.submitAnswers(answersRef.current);
-    }
+  const applyRoundStart = (l: string, endsAt: number, idx: number, total: number) => {
+    setLetter(l);
+    setRoundIdx(idx);
+    setTotalRounds(total);
+    setAnswers({});
+    setStopping(false);
+    tickLoop(endsAt);
   };
 
-  const onStopPressed = () => setShowStopConfirm(true);
+  const tickLoop = (endsAt: number) => {
+    const update = () => {
+      const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+      setRemaining(left);
+      if (left > 0 && left <= 5 && left !== lastTickRef.current) {
+        lastTickRef.current = left;
+        play('tick');
+      }
+    };
+    update();
+    const id = setInterval(() => {
+      update();
+      if (Date.now() >= endsAt) clearInterval(id);
+    }, 250);
+  };
 
-  const confirmStop = () => {
-    setShowStopConfirm(false);
-    submitOnce();
-    if (role === 'host') {
-      HostService.requestStop();
-    } else {
-      ClientService.sendStop();
-    }
+  const setField = (cat: string, val: string) => {
+    setAnswers((a) => ({ ...a, [cat]: val }));
+  };
+
+  const submitMine = () => {
+    if (mode === 'host') HostService.submitHostAnswers(answers);
+    else ClientService.submitAnswers(answers);
+  };
+
+  const onStop = () => {
+    submitMine();
+    if (mode === 'host') HostService.requestStop();
+    else ClientService.sendStop();
   };
 
   const confirmExit = () => {
-    setShowExitConfirm(false);
-    if (role === 'host') HostService.stop();
+    if (mode === 'host') HostService.stop();
     else ClientService.disconnect();
-    navigation.replace('Home');
+    navigation.popToTop();
   };
 
-  const setAnswer = (cat: string, val: string) =>
-    setAnswers(prev => ({ ...prev, [cat]: val }));
-
-  const timerColor = useMemo(() => {
-    if (remaining <= 10) return Colors.danger;
-    if (remaining <= 30) return Colors.warning;
-    return Colors.accent;
-  }, [remaining]);
-
-  // ----- Loading state: round hasn't started broadcasting to us yet -----
-  if (!letter) {
-    return (
-      <SafeAreaView style={styles.safe} edges={['bottom']}>
-        <View style={styles.centered}>
-          <Text style={styles.bigMuted}>در انتظار شروع دور…</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
-    <SafeAreaView style={styles.safe} edges={['bottom']}>
-      <View style={styles.headerCard}>
-        <View style={styles.letterBadge}>
-          <Text style={styles.letterText}>{letter}</Text>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+      <View style={styles.header}>
+        <View style={styles.letterBox}>
+          <Text style={styles.letterLbl}>حرف</Text>
+          <Text style={styles.letter}>{letter || '…'}</Text>
         </View>
-        <View style={{ flex: 1, alignItems: 'flex-start' }}>
-          <Text style={styles.timerLabel}>زمان باقی‌مانده</Text>
-          <Text style={[styles.timerValue, { color: timerColor }]}>{remaining}s</Text>
+        <View style={styles.metaCol}>
+          <Text style={styles.metaLbl}>دور</Text>
+          <Text style={styles.metaVal}>{roundIdx}/{totalRounds}</Text>
+        </View>
+        <View style={styles.metaCol}>
+          <Text style={styles.metaLbl}>زمان</Text>
+          <Text style={[styles.metaVal, remaining <= 10 && { color: Colors.danger }]}>
+            {remaining}
+          </Text>
         </View>
       </View>
 
-      <ScrollView
-        contentContainerStyle={styles.list}
-        keyboardShouldPersistTaps="handled"
-      >
-        {CATEGORIES.map(cat => (
-          <View key={cat} style={styles.row}>
-            <Text style={styles.rowLabel}>{cat}</Text>
+      <View style={styles.formCard}>
+        {CATEGORIES.map((cat) => (
+          <View key={cat} style={styles.field}>
+            <Text style={styles.fieldLabel}>{cat}</Text>
             <TextInput
-              style={[styles.rowInput, locked && styles.rowInputLocked]}
+              style={styles.input}
               value={answers[cat] || ''}
-              onChangeText={(t) => setAnswer(cat, t)}
-              editable={!locked}
-              placeholder={`با «${letter}» شروع شود`}
+              onChangeText={(t) => setField(cat, t)}
+              placeholder={`با حرف ${letter}…`}
               placeholderTextColor={Colors.textDim}
+              editable={!stopping && remaining > 0}
               maxLength={30}
             />
           </View>
         ))}
+      </View>
 
-        <View style={{ height: Spacing.lg }} />
-
-        <Button
-          title={waitingForResults ? 'در حال جمع‌آوری پاسخ‌ها…' : '🛑 استاپ! (پایان دور)'}
-          variant="danger"
-          loading={waitingForResults}
-          disabled={locked}
-          onPress={onStopPressed}
-        />
-      </ScrollView>
-
-      <Modal
-        visible={showStopConfirm}
-        title="پایان دور؟"
-        message="با زدن استاپ، دور برای همه‌ی بازیکنان به‌پایان می‌رسد و پاسخ‌ها نمره‌دهی می‌شوند."
-        confirmText="بله، استاپ"
-        cancelText="ادامه می‌دهم"
+      <Button
+        label={stopping ? '… در حال پایان' : '🛑 استوپ!'}
         variant="danger"
-        onConfirm={confirmStop}
-        onCancel={() => setShowStopConfirm(false)}
+        onPress={onStop}
+        disabled={stopping || remaining <= 0}
       />
+      <Button label="خروج از بازی" variant="ghost" onPress={() => setExitOpen(true)} />
 
-      <Modal
-        visible={showExitConfirm}
-        title="خروج از بازی؟"
-        message={role === 'host'
-          ? 'با خروج، میزبانی پایان می‌یابد و همه‌ی بازیکنان قطع می‌شوند.'
-          : 'با خروج از بازی، اتصال شما به میزبان قطع می‌شود.'}
-        confirmText="بله، خارج شو"
-        cancelText="در بازی می‌مانم"
-        variant="danger"
-        onConfirm={confirmExit}
-        onCancel={() => setShowExitConfirm(false)}
+      <AppModal
+        visible={exitOpen}
+        title="خروج از بازی"
+        message="مطمئنی می‌خواهی از این بازی خارج شوی؟ اتصال قطع می‌شود."
+        buttons={[
+          { text: 'خروج', variant: 'danger', onPress: confirmExit },
+          { text: 'ادامه', variant: 'secondary' },
+        ]}
+        onClose={() => setExitOpen(false)}
       />
-    </SafeAreaView>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.bg },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  bigMuted: { fontFamily: Font.bold, fontSize: 18, color: Colors.textMuted },
-
-  headerCard: {
-    margin: Spacing.lg,
-    padding: Spacing.md,
-    backgroundColor: Colors.card,
-    borderRadius: Radius.xl,
-    borderWidth: 1, borderColor: Colors.border,
+  container: { backgroundColor: Colors.bg, padding: Spacing.lg, gap: Spacing.md },
+  header: {
     flexDirection: 'row-reverse',
+    backgroundColor: Colors.bgElevated,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
     alignItems: 'center',
     gap: Spacing.md,
-    ...Shadow.card,
   },
-  letterBadge: {
-    width: 76, height: 76,
-    borderRadius: 38,
+  letterBox: {
+    width: 90,
+    height: 90,
+    borderRadius: Radius.lg,
     backgroundColor: Colors.primary,
-    alignItems: 'center', justifyContent: 'center',
-    ...Shadow.soft,
-  },
-  letterText: { fontFamily: Font.bold, fontSize: 44, color: '#fff', marginTop: -4 },
-  timerLabel: { fontFamily: Font.regular, fontSize: 12, color: Colors.textMuted },
-  timerValue: { fontFamily: Font.bold, fontSize: 30, marginTop: 2 },
-
-  list: { paddingHorizontal: Spacing.lg, paddingBottom: Spacing.xl, gap: 10 },
-
-  row: {
-    flexDirection: 'row-reverse',
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  letterLbl: { color: 'rgba(255,255,255,0.8)', fontFamily: Font.regular, fontSize: 12 },
+  letter: { color: '#fff', fontFamily: Font.bold, fontSize: 44, lineHeight: 50 },
+  metaCol: { flex: 1, alignItems: 'center' },
+  metaLbl: { color: Colors.textMuted, fontFamily: Font.regular, fontSize: 12 },
+  metaVal: { color: Colors.text, fontFamily: Font.bold, fontSize: 28 },
+  formCard: {
+    backgroundColor: Colors.bgElevated,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.sm,
+  },
+  field: { gap: 4 },
+  fieldLabel: { color: Colors.textMuted, fontFamily: Font.bold, fontSize: 13 },
+  input: {
     backgroundColor: Colors.card,
     borderRadius: Radius.md,
-    borderWidth: 1, borderColor: Colors.border,
-    paddingHorizontal: Spacing.md,
-    height: 54,
-  },
-  rowLabel: {
-    fontFamily: Font.bold,
-    fontSize: 14,
-    color: Colors.accent,
-    width: 64,
-    textAlign: 'right',
-  },
-  rowInput: {
-    flex: 1,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: Colors.text,
     fontFamily: Font.regular,
     fontSize: 16,
-    color: Colors.text,
     textAlign: 'right',
-    paddingHorizontal: Spacing.sm,
   },
-  rowInputLocked: { color: Colors.textMuted },
 });
