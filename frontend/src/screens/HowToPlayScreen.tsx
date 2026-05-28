@@ -1,95 +1,69 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
+import Button from '../components/Button';
+import { Colors, Font, Spacing, Radius } from '../theme';
 
-const sections: { title: string; body: string }[] = [
+const sections = [
   {
-    title: '۱) شبکه‌ی مشترک',
-    body: 'همه‌ی بازیکنان باید روی یک شبکه‌ی Wi-Fi یکسان باشند. اگر در شبکه پیدا نشد، می‌توانید با IP میزبان به‌صورت دستی وصل شوید.',
+    title: '🎯 هدف بازی',
+    body: 'با هم‌بازی‌هایت در یک شبکه‌ی محلی Wi-Fi، با حرفی که تصادفی انتخاب می‌شود، باید برای هر دسته (نام، فامیل، شهر، …) یک کلمه بنویسی. کسی که سریع‌تر و یکتاتر بنویسد، بیشتر امتیاز می‌گیرد.',
   },
   {
-    title: '۲) میزبان و بازیکن',
-    body: 'یکی از دستگاه‌ها «میزبان» می‌شود (سرور محلی را اجرا می‌کند) و بقیه «پیوستن به بازی» را می‌زنند. میزبان هم خودش بازی می‌کند.',
+    title: '📡 راه‌اندازی',
+    body:
+      '۱) همه به یک Wi-Fi خانگی وصل شوید (اینترنت لازم نیست).\n' +
+      '۲) یک نفر «میزبانی» را بزند.\n' +
+      '۳) بقیه «پیوستن» را بزنند و میزبان را از لیست انتخاب کنند.\n' +
+      '۴) وقتی همه آماده شدند، میزبان «شروع مسابقه» را می‌زند.',
   },
   {
-    title: '۳) شروع دور',
-    body: 'وقتی همه آماده شدند، میزبان «شروع دور جدید» را می‌زند. یک حرف فارسی به‌صورت تصادفی برای همه نمایش داده می‌شود.',
+    title: '⏱️ روند هر دور',
+    body:
+      '• یک حرف تصادفی نمایش داده می‌شود.\n' +
+      '• تایمر شمارش معکوس شروع می‌شود.\n' +
+      '• برای هر دسته یک کلمه با آن حرف بنویس.\n' +
+      '• هر کس زودتر تمام کرد، دکمه‌ی «🛑 استوپ» را می‌زند.\n' +
+      '• بعد از استوپ، چند ثانیه فرصت است تا همه پاسخ‌هایشان را نهایی کنند.',
   },
   {
-    title: '۴) پرکردن دسته‌ها',
-    body: 'هر بازیکن سعی می‌کند برای دسته‌های نام، فامیل، شهر، کشور، غذا، حیوان، اشیاء و رنگ کلماتی پیدا کند که با حرف انتخاب‌شده شروع می‌شوند.',
+    title: '💯 امتیازدهی',
+    body:
+      '• پاسخ یکتا (هیچ‌کس دیگری ننوشته): ۱۰ امتیاز\n' +
+      '• پاسخ تکراری (یکی دیگر هم نوشته): ۵ امتیاز\n' +
+      '• پاسخ نامعتبر یا با حرف اشتباه: ۰ امتیاز',
   },
   {
-    title: '۵) استاپ!',
-    body: 'هر بازیکنی (نه فقط میزبان) می‌تواند هر زمان دکمه‌ی استاپ را بزند. با زدن استاپ، دور برای همه پایان می‌یابد و چند ثانیه فرصت می‌ماند تا پاسخ‌های نهایی جمع شود.',
-  },
-  {
-    title: '۶) امتیازدهی',
-    body: 'پاسخ معتبر و یکتا: ۱۰ امتیاز. پاسخ معتبر ولی تکراری با بازیکن دیگر: ۵ امتیاز. پاسخ خالی یا شروع‌نشده با حرف صحیح: صفر امتیاز.',
-  },
-  {
-    title: '۷) دور بعدی',
-    body: 'بعد از مشاهده‌ی نتایج، میزبان می‌تواند دور بعدی را شروع کند. بازیکنان همان حالت قبل می‌مانند و نیازی به وصل‌شدن مجدد نیست.',
+    title: '🏆 برنده‌ی مسابقه',
+    body: 'مسابقه چند دور دارد (در تنظیمات قابل تغییر). در پایان آخرین دور، مجموع امتیازهای همه جمع می‌شود و رتبه‌بندی نهایی نمایش داده می‌شود.',
   },
 ];
 
-export default function HowToPlayScreen() {
+export default function HowToPlayScreen({ navigation }: any) {
   return (
-    <SafeAreaView style={styles.safe} edges={['bottom']}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.intro}>
-          «اسم فامیل» یک بازی کلاسیک گروهی است. در این نسخه، بدون نیاز به اینترنت و فقط با Wi-Fi محلی، می‌توانید با دوستان‌تان بازی کنید.
-        </Text>
-
-        {sections.map((s) => (
-          <View key={s.title} style={styles.card}>
-            <Text style={styles.title}>{s.title}</Text>
-            <Text style={styles.body}>{s.body}</Text>
-          </View>
-        ))}
-
-        <View style={[styles.card, styles.tipCard]}>
-          <Text style={styles.tipTitle}>💡 نکته</Text>
-          <Text style={styles.body}>
-            تطبیق پاسخ‌های تکراری بدون حساسیت به فاصله و نیم‌فاصله انجام می‌شود؛ نسخه‌های مختلف عربی/فارسی حروف (مانند «ي» و «ی»، «ك» و «ک»، یا «أ»، «إ» و «ا») یکسان در نظر گرفته می‌شوند.
-          </Text>
+    <ScrollView contentContainerStyle={styles.container}>
+      <Text style={styles.h1}>راهنمای بازی</Text>
+      {sections.map((s) => (
+        <View key={s.title} style={styles.card}>
+          <Text style={styles.sTitle}>{s.title}</Text>
+          <Text style={styles.sBody}>{s.body}</Text>
         </View>
-      </ScrollView>
-    </SafeAreaView>
+      ))}
+      <Button label="بازگشت" variant="ghost" onPress={() => navigation.goBack()} />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.bg },
-  container: { padding: Spacing.lg, gap: Spacing.md },
-  intro: {
-    fontFamily: Font.regular,
-    fontSize: 14,
-    color: Colors.textMuted,
-    textAlign: 'right',
-    lineHeight: 24,
-    marginBottom: Spacing.sm,
-  },
+  container: { backgroundColor: Colors.bg, padding: Spacing.lg, gap: Spacing.md },
+  h1: { color: Colors.text, fontFamily: Font.bold, fontSize: 24, textAlign: 'center' },
   card: {
-    backgroundColor: Colors.card,
+    backgroundColor: Colors.bgElevated,
     borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
     padding: Spacing.md,
-    borderWidth: 1, borderColor: Colors.border,
-    ...Shadow.soft,
-    gap: 6,
+    gap: Spacing.sm,
   },
-  tipCard: {
-    backgroundColor: '#1a2540',
-    borderColor: Colors.accent,
-  },
-  title: { fontFamily: Font.bold, fontSize: 15, color: Colors.accent, textAlign: 'right' },
-  tipTitle: { fontFamily: Font.bold, fontSize: 15, color: Colors.warning, textAlign: 'right' },
-  body: {
-    fontFamily: Font.regular,
-    fontSize: 14,
-    color: Colors.text,
-    textAlign: 'right',
-    lineHeight: 24,
-  },
+  sTitle: { color: Colors.text, fontFamily: Font.bold, fontSize: 17, textAlign: 'right' },
+  sBody: { color: Colors.textMuted, fontFamily: Font.regular, fontSize: 14, lineHeight: 24, textAlign: 'right' },
 });
