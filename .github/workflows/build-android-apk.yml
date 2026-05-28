@@ -95,6 +95,30 @@ jobs:
             --bundle-output android/app/src/main/assets/index.android.bundle \
             --assets-dest android/app/src/main/res
 
+      - name: Configure Android SDK path
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          cat android/local.properties
+
+      - name: Disable New Architecture in gradle.properties
+        run: |
+          # Ensure newArchEnabled and hermesEnabled are stable for CI
+          if [ -f android/gradle.properties ]; then
+            sed -i 's/^newArchEnabled=.*/newArchEnabled=false/' android/gradle.properties
+            grep -q '^newArchEnabled=' android/gradle.properties || echo 'newArchEnabled=false' >> android/gradle.properties
+            grep -q '^hermesEnabled=' android/gradle.properties || echo 'hermesEnabled=true' >> android/gradle.properties
+          fi
+          echo "--- gradle.properties ---"
+          cat android/gradle.properties || true
+
+      - name: Generate React Native autolinking config
+        run: |
+          mkdir -p android/build/generated/autolinking
+          npx @react-native-community/cli config > android/build/generated/autolinking/autolinking.json
+          echo "✅ autolinking.json generated ($(wc -c < android/build/generated/autolinking/autolinking.json) bytes)"
+          # Sanity check: must be valid JSON
+          node -e "JSON.parse(require('fs').readFileSync('android/build/generated/autolinking/autolinking.json','utf8')); console.log('✅ Valid JSON')"
+
       - name: Build Debug APK
         run: |
           cd android
@@ -103,7 +127,10 @@ jobs:
             gradle wrapper --gradle-version 8.8 --distribution-type bin
           fi
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            -PnewArchEnabled=false
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
