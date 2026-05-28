@@ -1,248 +1,349 @@
 import TcpSocket from 'react-native-tcp-socket';
-import Zeroconf from 'react-native-zeroconf';
-import {
-  PORT, SERVICE_TYPE, CATEGORIES,
-  SCORE_UNIQUE, SCORE_DUPLICATE, STOP_COLLECTION_MS,
-} from '../utils/constants';
-import { randomLetter, startsWithLetter, normalizePersian } from '../utils/letters';
+import dgram from 'react-native-udp';
+import { PORT, DISCOVERY_SERVICE_TYPE, CATEGORIES, STOP_GRACE_MS } from '../utils/constants';
+import { pickRandomLetter, normalizeAnswer } from '../utils/letters';
 
-type Client = {
+type Listener = (ev: any) => void;
+
+type ClientConn = {
   id: string;
+  name: string;
   socket: any;
-  name: string | null;
-  answers: Record<string, string> | null;
+  buffer: string;
 };
-type Listener = (event: any) => void;
 
-export type RoundSnapshot = {
+type RoundSnapshot = {
   letter: string;
   endsAt: number;
-  durationMs: number;
-  categories: readonly string[];
+  index: number;       // 1-based current round number
+  total: number;       // total rounds in tournament
 };
 
+type Submission = { id: string; name: string; answers: Record<string, string> };
+
 class HostService {
+  private listeners: Listener[] = [];
   private server: any = null;
-  private zeroconf: Zeroconf | null = null;
-  private clients: Map<string, Client> = new Map();
-  private buffers: Map<string, string> = new Map();
-  private listeners: Set<Listener> = new Set();
+  private clients = new Map<string, ClientConn>();
+  private udpAnnouncer: any = null;
+  private announceInterval: any = null;
+  private currentRound: RoundSnapshot | null = null;
+  private hostName = '';
+  private hostId = 'host';
+  private submissions: Submission[] = [];
+  private stopTimer: any = null;
 
-  private roundActive = false;
-  private currentLetter: string | null = null;
-  private currentEndsAt = 0;
-  private currentDurationMs = 0;
+  // tournament
+  private totalRounds = 5;
+  private roundIndex = 0;                 // increments to 1,2,...
+  private tournamentScores = new Map<string, { name: string; total: number }>();
+  private roundLog: { letter: string; results: any[] }[] = [];
 
-  private endTimer: any = null;
-  private stopCollectionTimer: any = null;
+  // ---------- public API ----------
 
-  hostName = 'میزبان';
+  on(l: Listener) {
+    this.listeners.push(l);
+    return () => { this.listeners = this.listeners.filter(x => x !== l); };
+  }
 
-  on(l: Listener) { this.listeners.add(l); return () => this.listeners.delete(l); }
-  private emit(ev: any) { this.listeners.forEach(l => l(ev)); }
+  async start(hostName: string, totalRounds: number) {
+    this.hostName = hostName;
+    this.totalRounds = totalRounds;
+    this.roundIndex = 0;
+    this.tournamentScores.clear();
+    this.roundLog = [];
+    this.submissions = [];
+    this.currentRound = null;
 
-  async start(hostName: string) {
-    if (this.server) return; // already started
-    this.hostName = hostName || 'میزبان';
-    this.server = TcpSocket.createServer((socket: any) => this.onConnection(socket));
-    this.server.listen({ port: PORT, host: '0.0.0.0' });
-    this.server.on('error', (err: any) => this.emit({ type: 'ERROR', message: String(err) }));
+    // Track host as a "player" too
+    this.tournamentScores.set(this.hostId, { name: hostName, total: 0 });
 
-    try {
-      this.zeroconf = new Zeroconf();
-      this.zeroconf.publishService(SERVICE_TYPE, 'tcp', 'local.', `EsmFamil_${this.hostName}`, PORT);
-    } catch { /* ignore */ }
-
-    this.clients.set('host', { id: 'host', socket: null, name: this.hostName, answers: null });
+    await this.startTcp();
+    this.startUdpAnnounce();
     this.emitLobby();
   }
 
-  private onConnection(socket: any) {
-    const id = Math.random().toString(36).slice(2, 9);
-    this.clients.set(id, { id, socket, name: null, answers: null });
-    this.buffers.set(id, '');
-    socket.on('data', (data: Buffer) => this.onData(id, data));
-    socket.on('close', () => { this.clients.delete(id); this.buffers.delete(id); this.emitLobby(); });
-    socket.on('error', () => { this.clients.delete(id); this.buffers.delete(id); this.emitLobby(); });
+  stop() {
+    try { this.server?.close(); } catch { /* ignore */ }
+    this.server = null;
+    this.clients.forEach(c => { try { c.socket.destroy(); } catch {/*ignore*/} });
+    this.clients.clear();
+    if (this.announceInterval) { clearInterval(this.announceInterval); this.announceInterval = null; }
+    try { this.udpAnnouncer?.close(); } catch { /* ignore */ }
+    this.udpAnnouncer = null;
+    if (this.stopTimer) { clearTimeout(this.stopTimer); this.stopTimer = null; }
+    this.currentRound = null;
+    this.submissions = [];
   }
 
-  private onData(id: string, data: Buffer) {
-    const prev = this.buffers.get(id) || '';
-    const buf = prev + data.toString('utf8');
-    const parts = buf.split('\n');
-    this.buffers.set(id, parts.pop() || '');
-    for (const line of parts) {
-      if (!line.trim()) continue;
-      try { this.handleMessage(id, JSON.parse(line)); } catch { /* ignore */ }
-    }
+  getCurrentRound(): RoundSnapshot | null {
+    return this.currentRound;
   }
 
-  private handleMessage(id: string, msg: any) {
-    const client = this.clients.get(id);
-    if (!client) return;
+  getTournamentInfo() {
+    return { roundIndex: this.roundIndex, totalRounds: this.totalRounds };
+  }
 
-    if (msg.type === 'JOIN') {
-      client.name = String(msg.name || '').slice(0, 20) || 'مهمان';
-      this.emitLobby();
-      // If a round is currently active, sync the new client into it.
-      if (this.roundActive && client.socket) {
-        this.send(client.socket, this.roundStartPayload());
+  /** Begin next round. Returns false if tournament is already over. */
+  startRound(durationSeconds: number): boolean {
+    if (this.roundIndex >= this.totalRounds) return false;
+
+    this.roundIndex += 1;
+    const letter = pickRandomLetter();
+    const endsAt = Date.now() + durationSeconds * 1000;
+
+    this.currentRound = {
+      letter,
+      endsAt,
+      index: this.roundIndex,
+      total: this.totalRounds,
+    };
+    this.submissions = [];
+    if (this.stopTimer) { clearTimeout(this.stopTimer); this.stopTimer = null; }
+
+    const payload = {
+      type: 'ROUND_START',
+      letter,
+      endsAt,
+      index: this.roundIndex,
+      total: this.totalRounds,
+    };
+    this.broadcast(payload);
+    this.emit(payload);
+
+    // Auto-stop when timer expires
+    setTimeout(() => {
+      if (this.currentRound && this.currentRound.letter === letter && !this.stopTimer) {
+        this.requestStop();
       }
-    } else if (msg.type === 'ANSWERS' && this.roundActive) {
-      client.answers = msg.answers || {};
-    } else if (msg.type === 'STOP' && this.roundActive) {
-      // Any client requested stop. Trigger collection phase.
+    }, durationSeconds * 1000 + 100);
+
+    return true;
+  }
+
+  /** Called when host taps STOP or a client sends STOP. */
+  requestStop() {
+    if (!this.currentRound) return;
+    if (this.stopTimer) return; // already stopping
+    const msg = { type: 'STOP_TRIGGERED' };
+    this.broadcast(msg);
+    this.emit(msg);
+    // Give clients a grace window to submit
+    this.stopTimer = setTimeout(() => this.finalizeRound(), STOP_GRACE_MS);
+  }
+
+  submitHostAnswers(answers: Record<string, string>) {
+    if (!this.currentRound) return;
+    this.upsertSubmission({ id: this.hostId, name: this.hostName, answers });
+  }
+
+  // ---------- internals ----------
+
+  private emit(ev: any) {
+    this.listeners.forEach(l => { try { l(ev); } catch { /* ignore */ } });
+  }
+
+  private emitLobby() {
+    const players = [
+      { id: this.hostId, name: this.hostName },
+      ...Array.from(this.clients.values()).map(c => ({ id: c.id, name: c.name })),
+    ];
+    this.emit({ type: 'LOBBY', players });
+  }
+
+  private broadcast(obj: any) {
+    const line = JSON.stringify(obj) + '\n';
+    this.clients.forEach(c => {
+      try { c.socket.write(line); } catch { /* ignore */ }
+    });
+  }
+
+  private sendTo(id: string, obj: any) {
+    const c = this.clients.get(id);
+    if (!c) return;
+    try { c.socket.write(JSON.stringify(obj) + '\n'); } catch { /* ignore */ }
+  }
+
+  private upsertSubmission(s: Submission) {
+    const i = this.submissions.findIndex(x => x.id === s.id);
+    if (i >= 0) this.submissions[i] = s; else this.submissions.push(s);
+  }
+
+  private finalizeRound() {
+    if (!this.currentRound) return;
+    const { letter } = this.currentRound;
+
+    // Ensure host has a submission entry (may be empty)
+    if (!this.submissions.find(s => s.id === this.hostId)) {
+      this.upsertSubmission({ id: this.hostId, name: this.hostName, answers: {} });
+    }
+    // Ensure every connected client has an entry too
+    this.clients.forEach(c => {
+      if (!this.submissions.find(s => s.id === c.id)) {
+        this.upsertSubmission({ id: c.id, name: c.name, answers: {} });
+      }
+    });
+
+    const results = scoreRound(letter, this.submissions);
+
+    // Update tournament totals
+    results.forEach(r => {
+      const entry = this.tournamentScores.get(r.id) || { name: r.name, total: 0 };
+      entry.name = r.name;
+      entry.total += r.score;
+      this.tournamentScores.set(r.id, entry);
+    });
+    this.roundLog.push({ letter, results });
+
+    const isLast = this.roundIndex >= this.totalRounds;
+    const standings = Array.from(this.tournamentScores.entries())
+      .map(([id, v]) => ({ id, name: v.name, total: v.total }))
+      .sort((a, b) => b.total - a.total);
+
+    const msg: any = {
+      type: 'ROUND_END',
+      letter,
+      results,
+      index: this.roundIndex,
+      total: this.totalRounds,
+      isLast,
+      standings,
+    };
+
+    this.broadcast(msg);
+    this.emit(msg);
+
+    this.currentRound = null;
+    this.stopTimer = null;
+  }
+
+  private async startTcp() {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        this.server = TcpSocket.createServer((socket: any) => {
+          const id = `c_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+          let registered = false;
+          const conn: ClientConn = { id, name: '', socket, buffer: '' };
+
+          socket.on('data', (data: any) => {
+            conn.buffer += data.toString('utf8');
+            let idx: number;
+            while ((idx = conn.buffer.indexOf('\n')) >= 0) {
+              const line = conn.buffer.slice(0, idx).trim();
+              conn.buffer = conn.buffer.slice(idx + 1);
+              if (!line) continue;
+              try {
+                const m = JSON.parse(line);
+                this.handleClientMessage(conn, m, () => { registered = true; });
+              } catch { /* ignore malformed */ }
+            }
+          });
+
+          socket.on('close', () => {
+            this.clients.delete(id);
+            if (registered) this.emitLobby();
+          });
+          socket.on('error', () => { /* swallow */ });
+        });
+
+        this.server.listen({ port: PORT, host: '0.0.0.0' }, () => resolve());
+        this.server.on('error', (e: any) => reject(e));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  private handleClientMessage(conn: ClientConn, m: any, onRegister: () => void) {
+    if (m.type === 'JOIN') {
+      conn.name = String(m.name || 'Player').slice(0, 20);
+      this.clients.set(conn.id, conn);
+      this.tournamentScores.set(conn.id, { name: conn.name, total: 0 });
+      onRegister();
+      this.sendTo(conn.id, { type: 'WELCOME', id: conn.id });
+      // sync current round if any
+      if (this.currentRound) {
+        this.sendTo(conn.id, {
+          type: 'ROUND_START',
+          letter: this.currentRound.letter,
+          endsAt: this.currentRound.endsAt,
+          index: this.currentRound.index,
+          total: this.currentRound.total,
+        });
+      }
+      this.emitLobby();
+    } else if (m.type === 'ANSWERS') {
+      const c = this.clients.get(conn.id);
+      if (!c || !this.currentRound) return;
+      this.upsertSubmission({ id: c.id, name: c.name, answers: m.answers || {} });
+    } else if (m.type === 'STOP') {
       this.requestStop();
     }
   }
 
-  private send(socket: any, msg: any) {
-    try { socket.write(JSON.stringify(msg) + '\n'); } catch { /* ignore */ }
+  private startUdpAnnounce() {
+    try {
+      this.udpAnnouncer = dgram.createSocket({ type: 'udp4', reusePort: true });
+      this.udpAnnouncer.bind(0, () => {
+        try { this.udpAnnouncer.setBroadcast(true); } catch { /* ignore */ }
+        const msg = Buffer.from(JSON.stringify({
+          service: DISCOVERY_SERVICE_TYPE,
+          name: 'EsmFamil_' + this.hostName,
+          port: PORT,
+        }));
+        this.announceInterval = setInterval(() => {
+          try {
+            this.udpAnnouncer.send(msg, 0, msg.length, 8888, '255.255.255.255');
+          } catch { /* ignore */ }
+        }, 1500);
+      });
+    } catch { /* ignore */ }
   }
+}
 
-  private broadcast(msg: any) {
-    this.clients.forEach(c => { if (c.socket) this.send(c.socket, msg); });
-    this.emit(msg);
-  }
+// ---------- scoring ----------
 
-  private emitLobby() {
-    const players = Array.from(this.clients.values()).map(c => ({ id: c.id, name: c.name || 'مهمان' }));
-    this.broadcast({ type: 'LOBBY', players });
-  }
+function scoreRound(letter: string, subs: Submission[]) {
+  const normLetter = normalizeAnswer(letter);
 
-  // -------- Public API --------
+  // map: category -> map<normalizedValue, count>
+  const counts: Record<string, Map<string, number>> = {};
+  CATEGORIES.forEach(cat => {
+    counts[cat] = new Map();
+    subs.forEach(s => {
+      const raw = (s.answers[cat] || '').trim();
+      if (!raw) return;
+      const n = normalizeAnswer(raw);
+      if (!n) return;
+      if (!n.startsWith(normLetter)) return;
+      counts[cat].set(n, (counts[cat].get(n) || 0) + 1);
+    });
+  });
 
-  /** Snapshot of the current round (or null if no round). Used by GameScreen on mount to hydrate. */
-  getCurrentRound(): RoundSnapshot | null {
-    if (!this.roundActive || !this.currentLetter) return null;
-    return {
-      letter: this.currentLetter,
-      endsAt: this.currentEndsAt,
-      durationMs: this.currentDurationMs,
-      categories: CATEGORIES,
-    };
-  }
-
-  /** Start a new round. durationSeconds comes from Settings. */
-  startRound(durationSeconds: number) {
-    if (this.clients.size === 0) return;
-    this.clearTimers();
-
-    this.roundActive = true;
-    this.currentLetter = randomLetter();
-    this.currentDurationMs = Math.max(5, durationSeconds) * 1000;
-    this.currentEndsAt = Date.now() + this.currentDurationMs;
-    this.clients.forEach(c => (c.answers = null));
-
-    this.broadcast(this.roundStartPayload());
-
-    // Auto-end if nobody stops first.
-    this.endTimer = setTimeout(() => this.requestStop(), this.currentDurationMs);
-  }
-
-  private roundStartPayload() {
-    return {
-      type: 'ROUND_START',
-      letter: this.currentLetter,
-      categories: CATEGORIES,
-      durationMs: this.currentDurationMs,
-      endsAt: this.currentEndsAt,
-    };
-  }
-
-  /** Save host's own answers (host is the in-memory 'host' client). */
-  submitHostAnswers(answers: Record<string, string>) {
-    const host = this.clients.get('host');
-    if (host) host.answers = answers;
-  }
-
-  /**
-   * Called when ANY player presses STOP (host directly, or client via STOP message).
-   * Broadcasts STOP_TRIGGERED so every UI submits & locks, then waits a short
-   * window to collect final answers, then computes and broadcasts results.
-   */
-  requestStop() {
-    if (!this.roundActive) return;
-    if (this.stopCollectionTimer) return; // already collecting
-
-    if (this.endTimer) { clearTimeout(this.endTimer); this.endTimer = null; }
-
-    this.broadcast({ type: 'STOP_TRIGGERED' });
-
-    this.stopCollectionTimer = setTimeout(() => {
-      this.stopCollectionTimer = null;
-      this.endRoundAndScore();
-    }, STOP_COLLECTION_MS);
-  }
-
-  private endRoundAndScore() {
-    if (!this.roundActive) return;
-    this.roundActive = false;
-
-    const letter = this.currentLetter || '';
-
-    // Group equal normalized answers per category (case-insensitive in Persian).
-    const counts: Record<string, Record<string, number>> = {};
+  const results = subs.map(s => {
+    const breakdown: Record<string, { value: string; points: number; reason: string }> = {};
+    let total = 0;
     CATEGORIES.forEach(cat => {
-      counts[cat] = {};
-      this.clients.forEach(c => {
-        const raw = (c.answers?.[cat] || '').trim();
-        if (!raw) return;
-        if (!startsWithLetter(raw, letter)) return; // invalid: doesn't start with letter
-        const key = normalizePersian(raw);
-        counts[cat][key] = (counts[cat][key] || 0) + 1;
-      });
+      const raw = (s.answers[cat] || '').trim();
+      if (!raw) {
+        breakdown[cat] = { value: '', points: 0, reason: 'خالی' };
+        return;
+      }
+      const n = normalizeAnswer(raw);
+      if (!n.startsWith(normLetter)) {
+        breakdown[cat] = { value: raw, points: 0, reason: 'حرف نامناسب' };
+        return;
+      }
+      const c = counts[cat].get(n) || 1;
+      const pts = c === 1 ? 10 : 5;
+      breakdown[cat] = { value: raw, points: pts, reason: c === 1 ? 'یکتا' : 'تکراری' };
+      total += pts;
     });
+    return { id: s.id, name: s.name, score: total, breakdown };
+  });
 
-    const results = Array.from(this.clients.values()).map(c => {
-      let score = 0;
-      const breakdown: Record<string, { value: string; points: number; reason: string }> = {};
-      CATEGORIES.forEach(cat => {
-        const raw = (c.answers?.[cat] || '').trim();
-        if (!raw) {
-          breakdown[cat] = { value: '', points: 0, reason: 'خالی' };
-          return;
-        }
-        if (!startsWithLetter(raw, letter)) {
-          breakdown[cat] = { value: raw, points: 0, reason: 'حرف اول اشتباه' };
-          return;
-        }
-        const key = normalizePersian(raw);
-        const n = counts[cat][key] || 0;
-        const pts = n === 1 ? SCORE_UNIQUE : SCORE_DUPLICATE;
-        score += pts;
-        breakdown[cat] = { value: raw, points: pts, reason: n === 1 ? 'یکتا' : 'تکراری' };
-      });
-      return {
-        name: c.name || 'مهمان',
-        answers: c.answers || {},
-        breakdown,
-        score,
-      };
-    });
-
-    results.sort((a, b) => b.score - a.score);
-    this.broadcast({ type: 'ROUND_END', letter, results });
-    this.currentLetter = null;
-  }
-
-  private clearTimers() {
-    if (this.endTimer) { clearTimeout(this.endTimer); this.endTimer = null; }
-    if (this.stopCollectionTimer) { clearTimeout(this.stopCollectionTimer); this.stopCollectionTimer = null; }
-  }
-
-  stop() {
-    this.clearTimers();
-    try { this.server?.close(); } catch { /* ignore */ }
-    try { this.zeroconf?.unpublishService(`EsmFamil_${this.hostName}`); } catch { /* ignore */ }
-    try { this.zeroconf?.stop(); } catch { /* ignore */ }
-    this.clients.clear();
-    this.buffers.clear();
-    this.server = null;
-    this.zeroconf = null;
-    this.roundActive = false;
-    this.currentLetter = null;
-  }
+  results.sort((a, b) => b.score - a.score);
+  return results;
 }
 
 export default new HostService();
