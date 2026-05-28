@@ -1,155 +1,195 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-
 import Button from '../components/Button';
+import { Colors, Font, Spacing, Radius } from '../theme';
 import HostService from '../services/HostService';
-import ClientService from '../services/ClientService';
-import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
-import { CATEGORIES } from '../utils/constants';
+import { play } from '../utils/sounds';
 
-type Breakdown = Record<string, { value: string; points: number; reason: string }>;
-type Result = { name: string; score: number; breakdown: Breakdown };
+type Result = {
+  id: string;
+  name: string;
+  score: number;
+  breakdown: Record<string, { value: string; points: number; reason: string }>;
+};
 
-export default function ScoreScreen({ navigation, route }: any) {
-  const letter: string = route.params?.letter || '';
+type Standing = { id: string; name: string; total: number };
+
+export default function ScoreScreen({ route, navigation }: any) {
+  const mode: 'host' | 'client' = route.params?.mode || 'client';
   const results: Result[] = route.params?.results || [];
-  const role: 'host' | 'client' = route.params?.role || 'client';
+  const letter: string = route.params?.letter || '';
+  const index: number = route.params?.index || 1;
+  const total: number = route.params?.total || 1;
+  const isLast: boolean = !!route.params?.isLast;
+  const standings: Standing[] = route.params?.standings || [];
 
-  const goLobby = () => {
-    if (role === 'host') {
-      navigation.replace('Host');
-    } else {
-      navigation.replace('Game', { role: 'client' });
-    }
+  useEffect(() => {
+    if (isLast) play('win');
+  }, [isLast]);
+
+  const nextRound = () => {
+    const ok = HostService.startRound(90); // duration is taken from settings on Host; keep simple here
+    if (ok) navigation.replace('Game', { mode: 'host' });
   };
 
-  const goHome = () => {
-    if (role === 'host') HostService.stop();
-    else ClientService.disconnect();
-    navigation.replace('Home');
+  const finishToHome = () => {
+    HostService.stop();
+    navigation.popToTop();
   };
+
+  const trophy = (i: number) => (i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`);
 
   return (
-    <SafeAreaView style={styles.safe} edges={['bottom']}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <View style={styles.header}>
-          <View style={styles.letterBadge}>
-            <Text style={styles.letterText}>{letter}</Text>
-          </View>
-          <View>
-            <Text style={styles.heading}>نتایج این دور</Text>
-            <Text style={styles.subheading}>حرف انتخاب‌شده</Text>
-          </View>
-        </View>
+    <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.headerCard}>
+        <Text style={styles.h1}>
+          {isLast ? '🏆 پایان مسابقه' : `پایان دور ${index} از ${total}`}
+        </Text>
+        <Text style={styles.sub}>حرف این دور: {letter}</Text>
+      </View>
 
-        {results.map((r, idx) => {
-          const rank = idx + 1;
-          const isFirst = rank === 1;
-          return (
-            <View key={r.name + idx} style={[styles.card, isFirst && styles.cardFirst]}>
-              <View style={styles.cardHeader}>
-                <View style={styles.rankRow}>
-                  <Text style={[styles.rank, isFirst && styles.rankGold]}>
-                    {rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `#${rank}`}
-                  </Text>
-                  <Text style={styles.playerName}>{r.name}</Text>
-                </View>
-                <Text style={[styles.scoreBig, isFirst && styles.scoreGold]}>
-                  {r.score}
+      <Text style={styles.sectionTitle}>نتیجه‌ی این دور</Text>
+      {results.map((r, i) => (
+        <View key={r.id} style={styles.playerCard}>
+          <View style={styles.playerHead}>
+            <Text style={styles.playerName}>{trophy(i)} {r.name}</Text>
+            <Text style={styles.playerScore}>{r.score}</Text>
+          </View>
+          <View style={styles.breakdown}>
+            {Object.entries(r.breakdown).map(([cat, b]) => (
+              <View key={cat} style={styles.brRow}>
+                <Text style={styles.brCat}>{cat}</Text>
+                <Text style={styles.brVal}>{b.value || '—'}</Text>
+                <Text style={[
+                  styles.brPts,
+                  b.points === 10 && { color: Colors.success },
+                  b.points === 5 && { color: Colors.warning },
+                  b.points === 0 && { color: Colors.textDim },
+                ]}>
+                  {b.points}
                 </Text>
               </View>
-
-              <View style={styles.divider} />
-
-              {CATEGORIES.map(cat => {
-                const b = r.breakdown[cat] || { value: '', points: 0, reason: 'خالی' };
-                const color =
-                  b.points === 10 ? Colors.success :
-                  b.points === 5 ? Colors.warning :
-                  Colors.textDim;
-                return (
-                  <View key={cat} style={styles.bdRow}>
-                    <Text style={styles.bdCat}>{cat}</Text>
-                    <Text style={styles.bdValue} numberOfLines={1}>
-                      {b.value || '—'}
-                    </Text>
-                    <Text style={[styles.bdPoints, { color }]}>
-                      {b.points > 0 ? `+${b.points}` : b.reason}
-                    </Text>
-                  </View>
-                );
-              })}
-            </View>
-          );
-        })}
-
-        <View style={styles.actions}>
-          {role === 'host' ? (
-            <Button title="🎲 شروع دور بعدی" onPress={goLobby} />
-          ) : (
-            <Button title="در انتظار دور بعدی…" disabled onPress={() => {}} />
-          )}
-          <Button title="بازگشت به خانه" variant="secondary" onPress={goHome} />
+            ))}
+          </View>
         </View>
-      </ScrollView>
-    </SafeAreaView>
+      ))}
+
+      {standings.length > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>
+            {isLast ? '🏆 رتبه‌بندی نهایی' : '📊 رتبه‌بندی کل تا اینجا'}
+          </Text>
+          <View style={styles.standCard}>
+            {standings.map((s, i) => (
+              <View
+                key={s.id}
+                style={[styles.standRow, i === 0 && isLast && styles.standWinner]}
+              >
+                <Text style={styles.standRank}>{trophy(i)}</Text>
+                <Text style={styles.standName}>{s.name}</Text>
+                <Text style={styles.standTotal}>{s.total}</Text>
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+
+      {mode === 'host' ? (
+        isLast ? (
+          <Button label="🏠 بازگشت به صفحه‌ی اصلی" onPress={finishToHome} />
+        ) : (
+          <>
+            <Button label={`▶️ شروع دور ${index + 1}`} onPress={nextRound} />
+            <Button label="پایان مسابقه" variant="ghost" onPress={finishToHome} />
+          </>
+        )
+      ) : (
+        <Text style={styles.waitMsg}>
+          {isLast
+            ? 'منتظر بازگشت میزبان به صفحه‌ی اصلی…'
+            : 'منتظر شروع دور بعدی توسط میزبان…'}
+        </Text>
+      )}
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.bg },
-  container: { padding: Spacing.lg, gap: Spacing.md },
-
-  header: {
-    flexDirection: 'row-reverse',
+  container: { backgroundColor: Colors.bg, padding: Spacing.lg, gap: Spacing.md },
+  headerCard: {
+    backgroundColor: Colors.bgElevated,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.lg,
     alignItems: 'center',
-    gap: Spacing.md,
-    marginBottom: Spacing.sm,
   },
-  letterBadge: {
-    width: 64, height: 64, borderRadius: 32,
-    backgroundColor: Colors.primary,
-    alignItems: 'center', justifyContent: 'center',
-    ...Shadow.soft,
+  h1: { color: Colors.text, fontFamily: Font.bold, fontSize: 22, marginBottom: 4 },
+  sub: { color: Colors.textMuted, fontFamily: Font.regular, fontSize: 14 },
+  sectionTitle: {
+    color: Colors.text,
+    fontFamily: Font.bold,
+    fontSize: 17,
+    marginTop: Spacing.sm,
+    textAlign: 'right',
   },
-  letterText: { fontFamily: Font.bold, fontSize: 36, color: '#fff', marginTop: -4 },
-  heading: { fontFamily: Font.bold, fontSize: 22, color: Colors.text, textAlign: 'right' },
-  subheading: { fontFamily: Font.regular, fontSize: 12, color: Colors.textMuted, textAlign: 'right' },
-
-  card: {
-    backgroundColor: Colors.card,
+  playerCard: {
+    backgroundColor: Colors.bgElevated,
     borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
     padding: Spacing.md,
-    borderWidth: 1, borderColor: Colors.border,
-    ...Shadow.soft,
+    gap: Spacing.sm,
   },
-  cardFirst: {
-    borderColor: Colors.warning,
-    backgroundColor: '#1c2440',
-  },
-  cardHeader: {
+  playerHead: {
     flexDirection: 'row-reverse',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
   },
-  rankRow: { flexDirection: 'row-reverse', alignItems: 'center', gap: 10 },
-  rank: { fontFamily: Font.bold, fontSize: 22, color: Colors.textMuted },
-  rankGold: { color: Colors.warning },
-  playerName: { fontFamily: Font.bold, fontSize: 17, color: Colors.text },
-  scoreBig: { fontFamily: Font.bold, fontSize: 28, color: Colors.accent },
-  scoreGold: { color: Colors.warning },
-
-  divider: { height: 1, backgroundColor: Colors.border, marginVertical: Spacing.sm },
-
-  bdRow: {
+  playerName: { color: Colors.text, fontFamily: Font.bold, fontSize: 16 },
+  playerScore: {
+    color: Colors.accent,
+    fontFamily: Font.bold,
+    fontSize: 22,
+    minWidth: 50,
+    textAlign: 'left',
+  },
+  breakdown: { gap: 4 },
+  brRow: {
     flexDirection: 'row-reverse',
     alignItems: 'center',
-    paddingVertical: 6,
+    paddingVertical: 4,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
   },
-  bdCat: { fontFamily: Font.bold, fontSize: 13, color: Colors.textMuted, width: 60, textAlign: 'right' },
-  bdValue: { flex: 1, fontFamily: Font.regular, fontSize: 14, color: Colors.text, textAlign: 'right', paddingHorizontal: 8 },
-  bdPoints: { fontFamily: Font.bold, fontSize: 13, width: 70, textAlign: 'left' },
-
-  actions: { gap: 10, marginTop: Spacing.md },
+  brCat: { color: Colors.textMuted, fontFamily: Font.regular, fontSize: 13, width: 70 },
+  brVal: { flex: 1, color: Colors.text, fontFamily: Font.regular, fontSize: 14, textAlign: 'right' },
+  brPts: { fontFamily: Font.bold, fontSize: 14, width: 30, textAlign: 'left' },
+  standCard: {
+    backgroundColor: Colors.bgElevated,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.sm,
+    gap: 4,
+  },
+  standRow: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    padding: 10,
+    backgroundColor: Colors.card,
+    borderRadius: Radius.md,
+    gap: Spacing.sm,
+  },
+  standWinner: { backgroundColor: 'rgba(245,158,11,0.18)', borderWidth: 1, borderColor: Colors.warning },
+  standRank: { color: Colors.text, fontFamily: Font.bold, fontSize: 18, width: 32 },
+  standName: { flex: 1, color: Colors.text, fontFamily: Font.bold, fontSize: 15 },
+  standTotal: { color: Colors.accent, fontFamily: Font.bold, fontSize: 18 },
+  waitMsg: {
+    color: Colors.textMuted,
+    fontFamily: Font.regular,
+    fontSize: 14,
+    textAlign: 'center',
+    padding: Spacing.md,
+  },
 });
