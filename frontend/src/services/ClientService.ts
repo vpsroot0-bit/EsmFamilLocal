@@ -1,34 +1,30 @@
 import TcpSocket from 'react-native-tcp-socket';
 import Zeroconf from 'react-native-zeroconf';
-import { PORT, SERVICE_TYPE } from '../utils/constants';
-import type { RoundSnapshot } from './HostService';
+import dgram from 'react-native-udp';
+import { DISCOVERY_SERVICE_TYPE } from '../utils/constants';
 
-type Listener = (event: any) => void;
 export type Discovered = { name: string; host: string; port: number };
+type Listener = (ev: any) => void;
+
+type RoundSnapshot = {
+  letter: string;
+  endsAt: number;
+  index: number;
+  total: number;
+};
 
 class ClientService {
+  private listeners: Listener[] = [];
   private socket: any = null;
   private buffer = '';
-  private listeners: Set<Listener> = new Set();
   private zeroconf: Zeroconf | null = null;
-
+  private udpListener: any = null;
+  private myId: string | null = null;
   private currentRound: RoundSnapshot | null = null;
-  playerName = '';
 
-  on(l: Listener) { this.listeners.add(l); return () => this.listeners.delete(l); }
-  private emit(ev: any) {
-    // Cache round state so GameScreen can hydrate on mount.
-    if (ev?.type === 'ROUND_START') {
-      this.currentRound = {
-        letter: ev.letter,
-        endsAt: ev.endsAt,
-        durationMs: ev.durationMs,
-        categories: ev.categories,
-      };
-    } else if (ev?.type === 'ROUND_END' || ev?.type === 'DISCONNECTED') {
-      this.currentRound = null;
-    }
-    this.listeners.forEach(l => l(ev));
+  on(l: Listener) {
+    this.listeners.push(l);
+    return () => { this.listeners = this.listeners.filter(x => x !== l); };
   }
 
   getCurrentRound(): RoundSnapshot | null {
@@ -36,63 +32,114 @@ class ClientService {
   }
 
   startDiscovery(onFound: (s: Discovered) => void) {
+    // mDNS
     try {
       this.zeroconf = new Zeroconf();
-      this.zeroconf.on('resolved', (service: any) => {
-        const name = service.name || '';
-        if (!name.startsWith('EsmFamil_')) return;
-        const host = (service.addresses && service.addresses[0]) || service.host;
-        if (!host) return;
-        onFound({ name, host, port: service.port || PORT });
+      this.zeroconf.on('resolved', (svc: any) => {
+        if (svc?.name?.startsWith('EsmFamil_')) {
+          onFound({ name: svc.name, host: svc.host, port: svc.port });
+        }
       });
-      this.zeroconf.on('error', () => { /* ignore */ });
-      this.zeroconf.scan(SERVICE_TYPE, 'tcp', 'local.');
+      this.zeroconf.scan(DISCOVERY_SERVICE_TYPE, 'tcp', 'local.');
+    } catch { /* ignore */ }
+
+    // UDP broadcast fallback
+    try {
+      this.udpListener = dgram.createSocket({ type: 'udp4', reusePort: true });
+      this.udpListener.bind(8888, () => {
+        try { this.udpListener.setBroadcast(true); } catch {/*ignore*/}
+      });
+      this.udpListener.on('message', (msg: any, rinfo: any) => {
+        try {
+          const txt = msg.toString('utf8');
+          const obj = JSON.parse(txt);
+          if (obj?.service === DISCOVERY_SERVICE_TYPE && obj?.port) {
+            onFound({ name: obj.name || 'Game', host: rinfo.address, port: obj.port });
+          }
+        } catch { /* ignore */ }
+      });
     } catch { /* ignore */ }
   }
 
   stopDiscovery() {
-    try { this.zeroconf?.stop(); } catch { /* ignore */ }
+    try { this.zeroconf?.stop(); } catch {/*ignore*/}
     this.zeroconf = null;
+    try { this.udpListener?.close(); } catch {/*ignore*/}
+    this.udpListener = null;
   }
 
   connect(host: string, port: number, name: string) {
-    this.playerName = name;
-    this.socket = TcpSocket.createConnection({ host, port }, () => {
-      this.send({ type: 'JOIN', name });
-      this.emit({ type: 'CONNECTED' });
-    });
-    this.socket.on('data', (data: Buffer) => this.onData(data));
-    this.socket.on('error', (err: any) => this.emit({ type: 'ERROR', message: String(err) }));
-    this.socket.on('close', () => this.emit({ type: 'DISCONNECTED' }));
-  }
+    this.disconnect();
+    this.buffer = '';
+    this.currentRound = null;
 
-  private onData(data: Buffer) {
-    this.buffer += data.toString('utf8');
-    const parts = this.buffer.split('\n');
-    this.buffer = parts.pop() || '';
-    for (const line of parts) {
-      if (!line.trim()) continue;
-      try { this.emit(JSON.parse(line)); } catch { /* ignore */ }
+    try {
+      this.socket = TcpSocket.createConnection({ host, port }, () => {
+        try {
+          this.socket.write(JSON.stringify({ type: 'JOIN', name }) + '\n');
+        } catch { /* ignore */ }
+        this.emit({ type: 'CONNECTED' });
+      });
+
+      this.socket.on('data', (data: any) => {
+        this.buffer += data.toString('utf8');
+        let idx: number;
+        while ((idx = this.buffer.indexOf('\n')) >= 0) {
+          const line = this.buffer.slice(0, idx).trim();
+          this.buffer = this.buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const m = JSON.parse(line);
+            this.handleMessage(m);
+          } catch { /* ignore */ }
+        }
+      });
+
+      this.socket.on('close', () => this.emit({ type: 'DISCONNECTED' }));
+      this.socket.on('error', (e: any) => this.emit({ type: 'ERROR', message: String(e?.message || e) }));
+    } catch (e: any) {
+      this.emit({ type: 'ERROR', message: String(e?.message || e) });
     }
   }
 
-  send(msg: any) {
-    try { this.socket?.write(JSON.stringify(msg) + '\n'); } catch { /* ignore */ }
+  disconnect() {
+    try { this.socket?.destroy(); } catch {/*ignore*/}
+    this.socket = null;
+    this.currentRound = null;
   }
 
   submitAnswers(answers: Record<string, string>) {
-    this.send({ type: 'ANSWERS', answers });
+    if (!this.socket) return;
+    try {
+      this.socket.write(JSON.stringify({ type: 'ANSWERS', answers }) + '\n');
+    } catch { /* ignore */ }
   }
 
   sendStop() {
-    this.send({ type: 'STOP' });
+    if (!this.socket) return;
+    try {
+      this.socket.write(JSON.stringify({ type: 'STOP' }) + '\n');
+    } catch { /* ignore */ }
   }
 
-  disconnect() {
-    try { this.socket?.destroy(); } catch { /* ignore */ }
-    this.socket = null;
-    this.buffer = '';
-    this.currentRound = null;
+  private handleMessage(m: any) {
+    if (m.type === 'WELCOME') {
+      this.myId = m.id;
+    } else if (m.type === 'ROUND_START') {
+      this.currentRound = {
+        letter: m.letter,
+        endsAt: m.endsAt,
+        index: m.index || 1,
+        total: m.total || 1,
+      };
+    } else if (m.type === 'ROUND_END') {
+      this.currentRound = null;
+    }
+    this.emit(m);
+  }
+
+  private emit(ev: any) {
+    this.listeners.forEach(l => { try { l(ev); } catch { /* ignore */ } });
   }
 }
 
