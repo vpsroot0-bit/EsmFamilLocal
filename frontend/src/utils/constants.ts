@@ -1,20 +1,14 @@
-export const PORT = 8765;
-export const SERVICE_TYPE = 'esmfamil';
-export const SERVICE_PROTOCOL = 'tcp';
-export const SERVICE_DOMAIN = 'local.';
+export const PORT = 7777;
+export const DISCOVERY_SERVICE_TYPE = 'esmfamil';
 
-// Default round duration (seconds). Persisted in AsyncStorage; user can change in Settings.
-export const DEFAULT_ROUND_SECONDS = 90;
-export const MIN_ROUND_SECONDS = 20;
+export const CATEGORIES = ['نام', 'فامیل', 'شهر', 'کشور', 'غذا', 'حیوان', 'اشیاء', 'رنگ'];
+
+export const MIN_ROUND_SECONDS = 30;
 export const MAX_ROUND_SECONDS = 300;
+export const DEFAULT_ROUND_SECONDS = 90;
 
-// After a STOP is triggered (by anyone), host waits this long to collect final answers from clients.
-export const STOP_COLLECTION_MS = 2500;
+export const MIN_ROUNDS = 1;
+export const MAX_ROUNDS = 20;
+export const DEFAULT_TOTAL_ROUNDS = 5;
 
-export const CATEGORIES = ['نام', 'فامیل', 'شهر', 'کشور', 'غذا', 'حیوان', 'اشیاء', 'رنگ'] as const;
-export type Category = typeof CATEGORIES[number];
-
-// Scoring
-export const SCORE_UNIQUE = 10;
-export const SCORE_DUPLICATE = 5;
-export const SCORE_INVALID = 0;
+export const STOP_GRACE_MS = 2500;
