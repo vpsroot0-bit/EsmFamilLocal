@@ -50,7 +50,6 @@ jobs:
       - name: Download sound effects
         run: |
           mkdir -p assets/sounds
-          # Short, royalty-free game SFX from Mixkit (direct CDN, no auth)
           if [ ! -s assets/sounds/start.mp3 ]; then
             curl -L -o assets/sounds/start.mp3 \
               "https://assets.mixkit.co/active_storage/sfx/2018/2018-preview.mp3"
@@ -99,8 +98,12 @@ jobs:
       - name: Build Debug APK
         run: |
           cd android
+          if [ ! -f gradlew ]; then
+            echo "Gradle wrapper not found, generating one..."
+            gradle wrapper --gradle-version 8.8 --distribution-type bin
+          fi
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
