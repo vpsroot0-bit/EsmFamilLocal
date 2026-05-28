@@ -5,7 +5,8 @@ import { Colors, Font, Radius, Shadow } from '../theme';
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
 
 type Props = {
-  title: string;
+  label?: string;
+  title?: string;
   onPress?: () => void;
   variant?: Variant;
   disabled?: boolean;
@@ -15,8 +16,10 @@ type Props = {
 };
 
 export default function Button({
-  title, onPress, variant = 'primary', disabled, loading, style, textStyle,
+  label, title, onPress, variant = 'primary', disabled, loading, style, textStyle,
 }: Props) {
+  const text = label ?? title ?? '';
+
   const bg = {
     primary: Colors.primary,
     secondary: Colors.card,
@@ -45,7 +48,7 @@ export default function Button({
       {loading ? (
         <ActivityIndicator color={textColor} />
       ) : (
-        <Text style={[styles.label, { color: textColor }, textStyle]}>{title}</Text>
+        <Text style={[styles.label, { color: textColor }, textStyle]}>{text}</Text>
       )}
     </Pressable>
   );
