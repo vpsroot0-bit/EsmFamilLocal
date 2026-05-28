@@ -1,181 +1,150 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TextInput, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { NetworkInfo } from 'react-native-network-info';
-
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import Button from '../components/Button';
+import AppModal from '../components/Modal';
+import { Colors, Font, Spacing, Radius } from '../theme';
 import HostService from '../services/HostService';
-import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
 import { loadSettings } from '../utils/settings';
+import { play } from '../utils/sounds';
 
 export default function HostScreen({ navigation }: any) {
-  const [started, setStarted] = useState(false);
-  const [hostName, setHostName] = useState('');
   const [players, setPlayers] = useState<{ id: string; name: string }[]>([]);
-  const [ip, setIp] = useState<string | null>(null);
-  const [roundSeconds, setRoundSeconds] = useState(90);
-  const isMounted = useRef(true);
+  const [hostName, setHostName] = useState('میزبان');
+  const [roundSec, setRoundSec] = useState(90);
+  const [totalRounds, setTotalRounds] = useState(5);
+  const [ready, setReady] = useState(false);
+  const [modal, setModal] = useState<{ open: boolean; title: string; msg: string }>({
+    open: false, title: '', msg: '',
+  });
 
   useEffect(() => {
-    isMounted.current = true;
-    loadSettings().then(s => {
-      if (!isMounted.current) return;
-      setRoundSeconds(s.roundSeconds);
-      if (s.playerName) setHostName(s.playerName);
+    (async () => {
+      const s = await loadSettings();
+      const name = s.playerName || 'میزبان';
+      setHostName(name);
+      setRoundSec(s.roundSeconds);
+      setTotalRounds(s.totalRounds);
+      try {
+        await HostService.start(name, s.totalRounds);
+        setReady(true);
+      } catch (e: any) {
+        setModal({ open: true, title: 'خطا در راه‌اندازی', msg: String(e?.message || e) });
+      }
+    })();
+
+    const off = HostService.on((ev) => {
+      if (ev.type === 'LOBBY') {
+        const prevCount = players.length;
+        setPlayers(ev.players);
+        if (ev.players.length > prevCount + 1) {
+          // someone joined
+          play('join');
+        }
+      }
     });
-    NetworkInfo.getIPV4Address().then(addr => {
-      if (isMounted.current) setIp(addr || null);
-    });
-    return () => { isMounted.current = false; };
+
+    return () => {
+      off();
+      HostService.stop();
+    };
   }, []);
 
-  // Subscribe to host events. CRITICAL: we DO NOT navigate away on ROUND_START here.
-  // GameScreen pulls round state directly from HostService.getCurrentRound() on mount.
-  useEffect(() => {
-    const off = HostService.on((ev: any) => {
-      if (ev.type === 'LOBBY') setPlayers(ev.players || []);
-    });
-    return () => { off(); };
-  }, []);
-
-  // Cleanup host server only if user leaves AND we haven't transitioned to Game.
-  // We rely on explicit navigation; HostService persists across the navigation stack.
-  // Server is fully torn down only when user explicitly taps "پایان میزبانی".
-
-  const start = async () => {
-    if (!hostName.trim()) {
-      Alert.alert('خطا', 'لطفاً نام میزبان را وارد کنید.');
+  const startGame = () => {
+    play('start');
+    const started = HostService.startRound(roundSec);
+    if (!started) {
+      setModal({ open: true, title: 'مسابقه تمام شده', msg: 'برای شروع دوباره از صفحه‌ی اصلی وارد شو.' });
       return;
     }
-    try {
-      await HostService.start(hostName.trim());
-      setStarted(true);
-    } catch (e: any) {
-      Alert.alert('خطا در راه‌اندازی', String(e?.message || e));
-    }
-  };
-
-  const stopHosting = () => {
-    HostService.stop();
-    setStarted(false);
-    setPlayers([]);
-    navigation.goBack();
-  };
-
-  const startRound = () => {
-    if (players.length < 1) {
-      Alert.alert('بازیکنی نیست', 'حداقل یک بازیکن لازم است.');
-      return;
-    }
-    // 1) Navigate FIRST so GameScreen mounts and subscribes.
-    navigation.navigate('Game', { role: 'host' });
-    // 2) Start the round on next tick so the GameScreen listener is ready
-    //    to receive STOP_TRIGGERED/ROUND_END, and so getCurrentRound() returns the snapshot.
-    setTimeout(() => HostService.startRound(roundSeconds), 50);
+    navigation.navigate('Game', { mode: 'host', hostName });
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={['bottom']}>
-      <ScrollView contentContainerStyle={styles.container}>
-        {!started ? (
-          <View style={styles.card}>
-            <Text style={styles.label}>نام شما (میزبان)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="مثلاً علی"
-              placeholderTextColor={Colors.textDim}
-              value={hostName}
-              onChangeText={setHostName}
-              maxLength={20}
-            />
-            <Button title="شروع میزبانی" onPress={start} />
+    <ScrollView contentContainerStyle={styles.container}>
+      <Text style={styles.h1}>میزبانی بازی</Text>
+
+      <View style={styles.card}>
+        <Text style={styles.label}>نام میزبان</Text>
+        <Text style={styles.val}>{hostName}</Text>
+
+        <View style={styles.row}>
+          <View style={styles.col}>
+            <Text style={styles.label}>زمان هر دور</Text>
+            <Text style={styles.val}>{roundSec} ثانیه</Text>
           </View>
+          <View style={styles.col}>
+            <Text style={styles.label}>تعداد دور</Text>
+            <Text style={styles.val}>{totalRounds} دور</Text>
+          </View>
+        </View>
+
+        <Text style={styles.hint}>برای تغییر این مقادیر به «تنظیمات» برو.</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.label}>بازیکنان وصل‌شده ({players.length})</Text>
+        {players.length === 0 ? (
+          <Text style={styles.empty}>هنوز کسی وصل نشده. منتظر…</Text>
         ) : (
-          <>
-            <View style={styles.card}>
-              <Text style={styles.title}>منتظر بازیکن‌ها…</Text>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>آدرس IP این دستگاه</Text>
-                <Text style={styles.infoValue}>{ip || '—'}</Text>
-              </View>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>مدت هر دور</Text>
-                <Text style={styles.infoValue}>{roundSeconds} ثانیه</Text>
-              </View>
-              <Text style={styles.hint}>
-                بازیکن‌ها از بخش «پیوستن به بازی» می‌توانند بازی شما را پیدا کنند.
-              </Text>
+          players.map((p) => (
+            <View key={p.id} style={styles.playerRow}>
+              <Text style={styles.playerName}>{p.name}</Text>
+              <Text style={styles.playerBadge}>وصل</Text>
             </View>
-
-            <View style={styles.card}>
-              <Text style={styles.title}>بازیکنان متصل ({players.length})</Text>
-              {players.length === 0 ? (
-                <Text style={styles.muted}>هنوز کسی وصل نشده است…</Text>
-              ) : (
-                players.map(p => (
-                  <View key={p.id} style={styles.playerRow}>
-                    <Text style={styles.playerName}>{p.name}</Text>
-                    <Text style={styles.playerTag}>{p.id === 'host' ? 'میزبان' : 'متصل'}</Text>
-                  </View>
-                ))
-              )}
-            </View>
-
-            <View style={{ gap: 12 }}>
-              <Button title="🎲 شروع دور جدید" onPress={startRound} />
-              <Button title="پایان میزبانی" variant="danger" onPress={stopHosting} />
-            </View>
-          </>
+          ))
         )}
-      </ScrollView>
-    </SafeAreaView>
+      </View>
+
+      <Button
+        label={ready ? '▶️ شروع مسابقه' : '… در حال آماده‌سازی'}
+        onPress={startGame}
+        disabled={!ready || players.length < 1}
+      />
+      <Button label="بازگشت" variant="ghost" onPress={() => navigation.goBack()} />
+
+      <AppModal
+        visible={modal.open}
+        title={modal.title}
+        message={modal.msg}
+        onClose={() => setModal({ ...modal, open: false })}
+      />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.bg },
-  container: { padding: Spacing.lg, gap: Spacing.md },
-
+  container: { backgroundColor: Colors.bg, padding: Spacing.lg, gap: Spacing.md },
+  h1: { color: Colors.text, fontFamily: Font.bold, fontSize: 24, textAlign: 'center' },
   card: {
-    backgroundColor: Colors.card,
+    backgroundColor: Colors.bgElevated,
     borderRadius: Radius.lg,
-    padding: Spacing.lg,
-    borderWidth: 1, borderColor: Colors.border,
-    ...Shadow.soft,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
     gap: Spacing.sm,
   },
-  title: { fontFamily: Font.bold, fontSize: 18, color: Colors.text, textAlign: 'right' },
-  label: { fontFamily: Font.bold, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
-  input: {
-    backgroundColor: Colors.bgElevated,
-    color: Colors.text,
-    fontFamily: Font.regular,
-    fontSize: 16,
-    borderRadius: Radius.md,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 12,
-    borderWidth: 1, borderColor: Colors.border,
-    textAlign: 'right',
-    marginBottom: Spacing.sm,
-  },
-  hint: { fontFamily: Font.regular, fontSize: 12, color: Colors.textDim, textAlign: 'right', marginTop: 6 },
-  muted: { fontFamily: Font.regular, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
-
-  infoRow: {
-    flexDirection: 'row-reverse',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 4,
-  },
-  infoLabel: { fontFamily: Font.regular, fontSize: 13, color: Colors.textMuted },
-  infoValue: { fontFamily: Font.bold, fontSize: 15, color: Colors.accent },
-
+  row: { flexDirection: 'row-reverse', gap: Spacing.md },
+  col: { flex: 1 },
+  label: { color: Colors.textMuted, fontFamily: Font.regular, fontSize: 13 },
+  val: { color: Colors.text, fontFamily: Font.bold, fontSize: 18 },
+  hint: { color: Colors.textDim, fontFamily: Font.regular, fontSize: 12, marginTop: 4 },
+  empty: { color: Colors.textDim, fontFamily: Font.regular, fontSize: 14, textAlign: 'center', paddingVertical: 12 },
   playerRow: {
     flexDirection: 'row-reverse',
     justifyContent: 'space-between',
-    paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: Colors.border,
+    alignItems: 'center',
+    padding: 10,
+    backgroundColor: Colors.card,
+    borderRadius: Radius.md,
   },
-  playerName: { fontFamily: Font.bold, fontSize: 15, color: Colors.text },
-  playerTag: { fontFamily: Font.regular, fontSize: 12, color: Colors.success },
+  playerName: { color: Colors.text, fontFamily: Font.bold, fontSize: 15 },
+  playerBadge: {
+    color: Colors.success,
+    fontFamily: Font.bold,
+    fontSize: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: Radius.pill,
+    backgroundColor: 'rgba(16,185,129,0.15)',
+  },
 });
