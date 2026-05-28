@@ -1,161 +1,123 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TextInput, Pressable, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import Button from '../components/Button';
+import AppModal from '../components/Modal';
+import { Colors, Font, Spacing, Radius } from '../theme';
 import ClientService, { Discovered } from '../services/ClientService';
-import { Colors, Font, Radius, Shadow, Spacing } from '../theme';
-import { PORT } from '../utils/constants';
-import { loadSettings, saveSettings } from '../utils/settings';
+import { loadSettings } from '../utils/settings';
 
 export default function JoinScreen({ navigation }: any) {
-  const [name, setName] = useState('');
-  const [manualHost, setManualHost] = useState('');
-  const [discovered, setDiscovered] = useState<Discovered[]>([]);
-  const [connecting, setConnecting] = useState(false);
-  const isMounted = useRef(true);
+  const [name, setName] = useState('بازیکن');
+  const [found, setFound] = useState<Discovered[]>([]);
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const [modal, setModal] = useState<{ open: boolean; title: string; msg: string }>({
+    open: false, title: '', msg: '',
+  });
 
   useEffect(() => {
-    isMounted.current = true;
-    loadSettings().then(s => {
-      if (isMounted.current && s.playerName) setName(s.playerName);
+    (async () => {
+      const s = await loadSettings();
+      if (s.playerName) setName(s.playerName);
+    })();
+
+    const seen = new Set<string>();
+    ClientService.startDiscovery((svc) => {
+      const key = svc.host + ':' + svc.port;
+      if (seen.has(key)) return;
+      seen.add(key);
+      setFound((f) => [...f, svc]);
     });
 
-    ClientService.startDiscovery((s) => {
-      if (!isMounted.current) return;
-      setDiscovered(prev => {
-        if (prev.find(x => x.host === s.host && x.port === s.port)) return prev;
-        return [...prev, s];
-      });
-    });
-
-    const off = ClientService.on((ev: any) => {
-      if (!isMounted.current) return;
+    const off = ClientService.on((ev) => {
       if (ev.type === 'CONNECTED') {
-        setConnecting(false);
-        // Persist name for next time.
-        saveSettings({ playerName: name.trim() }).catch(() => {});
-        navigation.replace('Game', { role: 'client' });
+        setConnecting(null);
+        navigation.replace('Game', { mode: 'client', playerName: name });
       } else if (ev.type === 'ERROR') {
-        setConnecting(false);
-        Alert.alert('خطا در اتصال', ev.message || '');
-      } else if (ev.type === 'DISCONNECTED' && connecting) {
-        setConnecting(false);
-        Alert.alert('قطع اتصال', 'اتصال به میزبان برقرار نشد.');
+        setConnecting(null);
+        setModal({ open: true, title: 'خطا در اتصال', msg: String(ev.message || 'نامشخص') });
       }
     });
 
     return () => {
-      isMounted.current = false;
-      ClientService.stopDiscovery();
       off();
+      ClientService.stopDiscovery();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [name]);
 
-  const connectTo = (host: string, port: number) => {
-    if (!name.trim()) {
-      Alert.alert('خطا', 'لطفاً نام خود را وارد کنید.');
-      return;
-    }
-    setConnecting(true);
-    ClientService.connect(host, port, name.trim());
+  const connectTo = (svc: Discovered) => {
+    setConnecting(svc.host);
+    ClientService.connect(svc.host, svc.port, name);
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={['bottom']}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <View style={styles.card}>
-          <Text style={styles.label}>نام شما</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="مثلاً سارا"
-            placeholderTextColor={Colors.textDim}
-            value={name}
-            onChangeText={setName}
-            maxLength={20}
-          />
-        </View>
+    <ScrollView contentContainerStyle={styles.container}>
+      <Text style={styles.h1}>پیوستن به بازی</Text>
 
-        <View style={styles.card}>
-          <Text style={styles.title}>بازی‌های پیدا شده در شبکه</Text>
-          {discovered.length === 0 ? (
-            <Text style={styles.muted}>در حال جستجو…</Text>
-          ) : (
-            discovered.map((s) => (
-              <Pressable
-                key={s.host + s.port}
-                style={styles.discoverRow}
-                onPress={() => connectTo(s.host, s.port)}
-              >
-                <View>
-                  <Text style={styles.gameName}>{s.name.replace('EsmFamil_', '')}</Text>
-                  <Text style={styles.gameAddr}>{s.host}:{s.port}</Text>
-                </View>
-                <Text style={styles.joinTag}>پیوستن →</Text>
-              </Pressable>
-            ))
-          )}
-        </View>
+      <View style={styles.card}>
+        <Text style={styles.label}>نام شما</Text>
+        <Text style={styles.val}>{name}</Text>
+        <Text style={styles.hint}>برای تغییر نام به «تنظیمات» برو.</Text>
+      </View>
 
-        <View style={styles.card}>
-          <Text style={styles.title}>اتصال دستی با IP</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="192.168.1.10"
-            placeholderTextColor={Colors.textDim}
-            value={manualHost}
-            onChangeText={setManualHost}
-            keyboardType="numeric"
-            autoCapitalize="none"
-          />
-          <Button
-            title={connecting ? 'در حال اتصال…' : 'اتصال'}
-            loading={connecting}
-            onPress={() => manualHost && connectTo(manualHost.trim(), PORT)}
-          />
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+      <View style={styles.card}>
+        <Text style={styles.label}>میزبان‌های پیداشده ({found.length})</Text>
+        {found.length === 0 ? (
+          <Text style={styles.empty}>در حال جست‌وجو… مطمئن شو روی همان Wi-Fi هستی.</Text>
+        ) : (
+          found.map((svc) => (
+            <TouchableOpacity
+              key={svc.host + ':' + svc.port}
+              style={styles.hostRow}
+              onPress={() => connectTo(svc)}
+              disabled={!!connecting}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.hostName}>{svc.name.replace('EsmFamil_', '')}</Text>
+                <Text style={styles.hostAddr}>{svc.host}:{svc.port}</Text>
+              </View>
+              <Text style={styles.connectTxt}>
+                {connecting === svc.host ? '… وصل…' : 'اتصال ←'}
+              </Text>
+            </TouchableOpacity>
+          ))
+        )}
+      </View>
+
+      <Button label="بازگشت" variant="ghost" onPress={() => navigation.goBack()} />
+
+      <AppModal
+        visible={modal.open}
+        title={modal.title}
+        message={modal.msg}
+        onClose={() => setModal({ ...modal, open: false })}
+      />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.bg },
-  container: { padding: Spacing.lg, gap: Spacing.md },
-
+  container: { backgroundColor: Colors.bg, padding: Spacing.lg, gap: Spacing.md },
+  h1: { color: Colors.text, fontFamily: Font.bold, fontSize: 24, textAlign: 'center' },
   card: {
-    backgroundColor: Colors.card,
+    backgroundColor: Colors.bgElevated,
     borderRadius: Radius.lg,
-    padding: Spacing.lg,
-    borderWidth: 1, borderColor: Colors.border,
-    ...Shadow.soft,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.md,
     gap: Spacing.sm,
   },
-  title: { fontFamily: Font.bold, fontSize: 16, color: Colors.text, textAlign: 'right' },
-  label: { fontFamily: Font.bold, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
-  input: {
-    backgroundColor: Colors.bgElevated,
-    color: Colors.text,
-    fontFamily: Font.regular,
-    fontSize: 16,
-    borderRadius: Radius.md,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 12,
-    borderWidth: 1, borderColor: Colors.border,
-    textAlign: 'right',
-    marginBottom: Spacing.sm,
-  },
-  muted: { fontFamily: Font.regular, fontSize: 14, color: Colors.textMuted, textAlign: 'right' },
-
-  discoverRow: {
+  label: { color: Colors.textMuted, fontFamily: Font.regular, fontSize: 13 },
+  val: { color: Colors.text, fontFamily: Font.bold, fontSize: 18 },
+  hint: { color: Colors.textDim, fontFamily: Font.regular, fontSize: 12 },
+  empty: { color: Colors.textDim, fontFamily: Font.regular, fontSize: 14, textAlign: 'center', paddingVertical: 12 },
+  hostRow: {
     flexDirection: 'row-reverse',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1, borderBottomColor: Colors.border,
+    padding: 12,
+    backgroundColor: Colors.card,
+    borderRadius: Radius.md,
   },
-  gameName: { fontFamily: Font.bold, fontSize: 16, color: Colors.text, textAlign: 'right' },
-  gameAddr: { fontFamily: Font.regular, fontSize: 12, color: Colors.textDim, textAlign: 'right', marginTop: 2 },
-  joinTag: { fontFamily: Font.bold, fontSize: 14, color: Colors.accent },
+  hostName: { color: Colors.text, fontFamily: Font.bold, fontSize: 15, textAlign: 'right' },
+  hostAddr: { color: Colors.textDim, fontFamily: Font.regular, fontSize: 12, textAlign: 'right', marginTop: 2 },
+  connectTxt: { color: Colors.accent, fontFamily: Font.bold, fontSize: 14 },
 });
