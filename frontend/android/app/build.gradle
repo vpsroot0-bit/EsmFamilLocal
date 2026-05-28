@@ -6,7 +6,7 @@ def enableProguardInReleaseBuilds = false
 def jscFlavor = 'org.webkit:android-jsc:+'
 
 react {
-    // Autolinking is handled by the new RN 0.75+ system via settings.gradle
+    autolinkLibrariesWithApp()
 }
 
 android {
